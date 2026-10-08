@@ -1,0 +1,141 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Creality printer",
+        "description": "Enter the LAN IP of your Creality printer (WebSocket port 9999).",
+        "data": {
+          "host": "Host / IP",
+          "name": "Name",
+          "timelapse_folder": "Timelapse folder",
+          "timelapse_auto_save": "Save each print's timelapse automatically"
+        },
+        "data_description": {
+          "timelapse_folder": "Optional. Where timelapse videos are saved, automatically or with the card's Save timelapse button. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
+          "timelapse_auto_save": "Copy the video into the folder when a print finishes or is stopped. Needs a folder."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the printer WebSocket on port 9999.",
+      "folder_not_absolute": "Enter an absolute path, for example /media/nas/timelapses.",
+      "folder_not_allowed": "Home Assistant may not write to this folder. Use a folder under /media (network storage added with usage \"Media\" appears there) or add it to allowlist_external_dirs.",
+      "folder_not_writable": "The folder could not be created or is not writable. Check that the share is mounted and writable."
+    },
+    "abort": {
+      "already_configured": "This printer is already configured."
+    }
+  },
+  "options": {
+    "error": {
+      "custom_url_required": "Enter a camera URL when camera mode is set to custom.",
+      "invalid_camera_url": "The camera URL must start with http:// or https:// (MJPEG stream or snapshot).",
+      "folder_not_absolute": "Enter an absolute path, for example /media/nas/timelapses.",
+      "folder_not_allowed": "Home Assistant may not write to this folder. Use a folder under /media (network storage added with usage \"Media\" appears there) or add it to allowlist_external_dirs.",
+      "folder_not_writable": "The folder could not be created or is not writable. Check that the share is mounted and writable."
+    },
+    "step": {
+      "init": {
+        "title": "Creality options",
+        "data": {
+          "camera_mode": "Camera mode",
+          "custom_camera_url": "Custom camera URL",
+          "timelapse_folder": "Timelapse folder",
+          "timelapse_auto_save": "Save each print's timelapse automatically"
+        },
+        "data_description": {
+          "timelapse_folder": "Optional. Where timelapse videos are saved, automatically or with the card's Save timelapse button. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
+          "timelapse_auto_save": "Copy the video into the folder when a print finishes or is stopped. Needs a folder."
+        }
+      }
+    }
+  },
+  "entity": {
+    "image": {
+      "current_print_preview": { "name": "Current print preview" }
+    },
+    "sensor": {
+      "print_status": { "name": "Print status" },
+      "print_progress": { "name": "Print progress" },
+      "current_object": { "name": "Current object" },
+      "working_layer": { "name": "Working layer" },
+      "total_layers": { "name": "Total layers" },
+      "print_job_time": { "name": "Print job time" },
+      "print_time_left": { "name": "Print time left" },
+      "print_time_left_estimated": { "name": "Print time left (estimated)" },
+      "used_material_length": { "name": "Used material length" },
+      "filament_status": { "name": "Filament status" },
+      "nozzle_temperature": { "name": "Nozzle temperature" },
+      "bed_temperature": { "name": "Bed temperature" },
+      "print_speed": { "name": "Print speed" },
+      "position_x": { "name": "Position X" },
+      "position_y": { "name": "Position Y" },
+      "position_z": { "name": "Position Z" },
+      "toolhead_speed": { "name": "Toolhead speed" },
+      "extrusion_flow": { "name": "Extrusion flow" },
+      "total_jobs": { "name": "Total print jobs" },
+      "total_print_time": { "name": "Total print time" },
+      "total_filament_used": { "name": "Total filament used" },
+      "error_key": { "name": "Error key" },
+      "error_message": { "name": "Error message" },
+      "timelapse_archive": {
+        "name": "Timelapse saving",
+        "state": {
+          "off": "No folder",
+          "idle": "Idle",
+          "waiting": "Waiting for video",
+          "saving": "Saving",
+          "saved": "Saved",
+          "failed": "Failed"
+        }
+      }
+    },
+    "binary_sensor": {
+      "filament_runout": { "name": "Filament runout" },
+      "online": { "name": "Online" }
+    },
+    "button": {
+      "home_xy_then_z": { "name": "Home XY then Z" },
+      "pause_print": { "name": "Pause print" },
+      "resume_print": { "name": "Resume print" },
+      "stop_print": { "name": "Stop print" }
+    },
+    "number": {
+      "nozzle_target": { "name": "Nozzle target" },
+      "bed_target": { "name": "Bed target" },
+      "print_tuning": { "name": "Print speed multiplier" },
+      "flow_tuning": { "name": "Flow multiplier" }
+    },
+    "fan": {
+      "model_fan": { "name": "Model fan" },
+      "case_fan": { "name": "Case fan" },
+      "side_fan": { "name": "Side fan" }
+    },
+    "switch": {
+      "own_estimate": { "name": "Own time estimate" }
+    },
+    "light": {
+      "light": { "name": "Light" }
+    },
+    "camera": {
+      "printer_camera": { "name": "Printer camera" }
+    }
+  },
+  "issues": {
+    "legacy_card_resource": {
+      "title": "Old Creality card resource is still registered",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Remove the old Creality card resource",
+            "description": "The Creality integration now serves and loads its own card. These dashboard resources come from the deprecated standalone card and can load an outdated `creality-card` instead:\n\n{urls}\n\nSelect **Submit** to remove them, then reload the dashboard in your browser. Also uninstall the standalone card from HACS if it is installed there."
+          }
+        }
+      }
+    },
+    "legacy_card_resource_yaml": {
+      "title": "Old Creality card resource is still registered",
+      "description": "The Creality integration now serves and loads its own card. Remove these entries from the `resources:` section of your YAML dashboard configuration, restart Home Assistant and reload the dashboard: {urls}"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Real-Home-Assistant tests (Python 3.13). Pinned to the version verified locally.
+pytest-homeassistant-custom-component==0.13.316
+websockets>=12.0
+PyTurboJPEG

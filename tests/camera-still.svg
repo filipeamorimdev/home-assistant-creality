@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b2f33"/><stop offset="1" stop-color="#121416"/></linearGradient></defs>
+  <rect width="1280" height="720" fill="url(#g)"/>
+  <rect x="240" y="520" width="800" height="40" rx="6" fill="#3a3f44"/>
+  <rect x="560" y="330" width="160" height="190" rx="8" fill="#2dce89" opacity=".8"/>
+  <rect x="520" y="120" width="240" height="60" rx="8" fill="#555b61"/>
+  <rect x="620" y="180" width="40" height="70" fill="#7a8086"/>
+  <text x="40" y="60" fill="#9aa" font-family="sans-serif" font-size="32">Camera fixture</text>
+</svg>

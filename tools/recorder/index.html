@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Creality WS Recorder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div>
+          <h1>Creality WS Recorder</h1>
+          <p class="sub">
+            Standalone capture tool. Prefer the local proxy (<code>serve.py</code>) —
+            browsers often fail a direct <code>ws://printer:9999</code> handshake even when
+            Python can connect.
+          </p>
+        </div>
+        <div class="status-pill" id="conn-pill" data-state="disconnected">Disconnected</div>
+      </header>
+
+      <section class="panel controls">
+        <label class="field grow">
+          Printer host / IP
+          <input id="host" type="text" placeholder="192.168.1.50" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field narrow">
+          Port
+          <input id="port" type="number" value="9999" min="1" max="65535" />
+        </label>
+        <label class="check">
+          <input id="use-proxy" type="checkbox" checked />
+          Via local proxy (recommended)
+        </label>
+        <div class="btn-row">
+          <button type="button" class="btn primary" id="btn-connect">Connect</button>
+          <button type="button" class="btn" id="btn-disconnect" disabled>Disconnect</button>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn accent" id="btn-rec-start" disabled>Start recording</button>
+          <button type="button" class="btn danger" id="btn-rec-stop" disabled>Stop &amp; download</button>
+        </div>
+      </section>
+
+      <section class="stats" id="stats">
+        <div class="stat"><span>Messages</span><b id="stat-msgs">0</b></div>
+        <div class="stat"><span>Keys seen</span><b id="stat-keys">0</b></div>
+        <div class="stat"><span>Recording</span><b id="stat-rec">off</b></div>
+        <div class="stat"><span>Frames saved</span><b id="stat-frames">0</b></div>
+        <div class="stat"><span>Last RX</span><b id="stat-rx">—</b></div>
+      </section>
+
+      <section class="panel watch" id="print-watch" aria-live="polite">
+        <div class="watch-row">
+          <div><span>File</span><b id="w-file">—</b></div>
+          <div><span>State</span><b id="w-state">—</b></div>
+          <div><span>Progress</span><b id="w-progress">—</b></div>
+          <div><span>Layer</span><b id="w-layer">—</b></div>
+          <div><span>Nozzle</span><b id="w-nozzle">—</b></div>
+          <div><span>Bed</span><b id="w-bed">—</b></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-h">
+            <h2>Live state (merged)</h2>
+            <input id="filter" type="search" placeholder="Filter keys… (try print)" />
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Value</th>
+                  <th>Type</th>
+                </tr>
+              </thead>
+              <tbody id="state-body">
+                <tr class="empty">
+                  <td colspan="3">Connect to see telemetry.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">
+            <h2>Event log</h2>
+            <button type="button" class="btn tiny" id="btn-clear-log">Clear</button>
+          </div>
+          <pre id="log" class="log"></pre>
+        </div>
+      </section>
+
+      <p class="hint" id="hint"></p>
+    </div>
+    <script type="module" src="app.js?v=4"></script>
+  </body>
+</html>

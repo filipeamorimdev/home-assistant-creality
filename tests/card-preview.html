@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Creality card — completion layout fixture</title>
+<style>
+  body { background: #111; color: #eee; font-family: system-ui; margin: 24px auto; max-width: 1000px; }
+  nav { display: flex; gap: 8px; margin-bottom: 16px; }
+  button { padding: 10px; cursor: pointer; }
+  creality-card { display: block; }
+  @media(max-width: 600px) { body { margin: 12px; } }
+</style>
+<nav><button id="success">Completed</button><button id="stopped">Stopped</button><button id="next">New print</button><button id="half">Layer 365</button><button id="pause">Pause</button><button id="warning">Storage warning</button><button id="idle">Idle</button></nav>
+<script type="module">
+  customElements.define("home-assistant", class extends HTMLElement {});
+  // Stand-in for HA's icon element so buttons are visible here.
+  const GLYPHS = { "mdi:pause": "❚❚", "mdi:play": "▶", "mdi:stop": "■", "mdi:arrow-expand": "⤢", "mdi:camera": "◉",
+    "mdi:fullscreen": "⛶", "mdi:close": "✕", "mdi:home": "⌂", "mdi:chevron-down": "▾", "mdi:alert": "!", "mdi:alert-octagon": "!" };
+  customElements.define("ha-icon", class extends HTMLElement {
+    static observedAttributes = ["icon"];
+    attributeChangedCallback() { this.textContent = GLYPHS[this.getAttribute("icon")] || ""; }
+  });
+  await import("../custom_components/creality/frontend/creality-card.js");
+  const card = document.createElement("creality-card");
+  const FILE = "/usr/data/printer_data/gcodes/Shiny A_PETG_2h57m.gcode";
+  // Synthetic G-code silhouette: an arch from the front, a ramp from the side.
+  const z = Array.from({ length: 730 }, (_, i) => +(0.2 + i * 0.1).toFixed(2));
+  const profile = {
+    version: 1, layers: 730, z,
+    x: { min: 20, size: 60, bands: z.map((_, i) => [i, i, i < 420 ? [[0, 14], [46, 60]] : [[0, 60]]]) },
+    y: { min: 40, size: 50, bands: z.map((_, i) => [i, i, [[0, Math.max(6, 50 - i / 16)]]]) },
+  };
+  // Finished jobs have a timelapse, stopped ones none (no video file is served here).
+  const timelapse = () => states["sensor.status"].attributes.state_raw === 2
+    ? { status: "ready", url: "/tests/timelapse.mp4", download_url: "/tests/timelapse.mp4", size: 5811324, duration: 9, expires_in: 3600 }
+    : { status: "missing" };
+  // Whole-room meter history: 85 W before the printer came online an hour ago.
+  const t = Date.now() / 1000;
+  const history = {
+    "sensor.status": [{ s: "offline", lu: t - 9000 }, { s: "idle", lu: t - 3600 }],
+    "sensor.room_power": [{ s: "85", lu: t - 10000 }, { s: "312", lu: t - 3000 }],
+  };
+  const callWS = async (msg) => msg.type === "creality/print_profile"
+    ? { status: "ready", file: FILE, profile } : msg.type === "creality/timelapse" ? timelapse()
+    : msg.type === "history/history_during_period" ? { [msg.entity_ids[0]]: history[msg.entity_ids[0]] || [] } : {};
+  const states = {
+    "image.preview": { state: "2026-09-21T12:00:00Z", attributes: { entity_picture: "/tests/preview-part.svg" } },
+    "camera.printer": { state: "idle", attributes: { friendly_name: "Workshop printer Camera", access_token: "fixture", supported_features: 0 } },
+    "sensor.status": { state: "printing", attributes: { state_raw: 1, print_start_time: 100, file: FILE } },
+    "sensor.file": { state: "Shiny A_PETG_2h57m.gcode", attributes: {} },
+    "sensor.duration": { state: "10620", attributes: {} },
+    "sensor.material": { state: "22006", attributes: { unit_of_measurement: "mm" } },
+    "sensor.layer": { state: "730", attributes: {} },
+    "sensor.layers": { state: "730", attributes: {} },
+    "sensor.progress": { state: "100", attributes: { unit_of_measurement: "%" } },
+    "sensor.nozzle": { state: "219.6", attributes: { unit_of_measurement: "°C" } },
+    "number.nozzle_target": { state: "220", attributes: { min: 0, max: 300 } },
+    "sensor.bed": { state: "70.1", attributes: { unit_of_measurement: "°C" } },
+    "number.bed_target": { state: "70", attributes: { min: 0, max: 120 } },
+    "sensor.left": { state: "5310", attributes: {} },
+    "button.pause": { state: "unknown", attributes: {} },
+    "button.resume": { state: "unknown", attributes: {} },
+    "button.stop": { state: "unknown", attributes: {} },
+    "button.home": { state: "unknown", attributes: {} },
+    "number.speed": { state: "100", attributes: { min: 50, max: 200 } },
+    "fan.model": { state: "on", attributes: {} },
+    "sensor.z": { state: "36.7", attributes: {} },
+    "sensor.room_power": { state: "312", attributes: { unit_of_measurement: "W", friendly_name: "workshop general Power" } },
+  };
+  card.setConfig({ type: "custom:creality-card", title: "Workshop printer", status: "sensor.status",
+    object: "sensor.file", job_time: "sensor.duration", used_material: "sensor.material",
+    layer: "sensor.layer", total_layers: "sensor.layers", progress: "sensor.progress", preview: "image.preview",
+    print_energy: "sensor.room_power", camera: "camera.printer", nozzle: "sensor.nozzle",
+    nozzle_target: "number.nozzle_target", bed: "sensor.bed", bed_target: "number.bed_target", time_left: "sensor.left",
+    pause: "button.pause", resume: "button.resume", stop: "button.stop", home: "button.home",
+    print_tuning: "number.speed", model_fan: "fan.model", position_z: "sensor.z" });
+  // No camera proxy here: serve a still in place of the MJPEG stream.
+  const picture = card._picture.bind(card);
+  card._picture = (id, stream) => id.startsWith("camera.") ? "/tests/camera-still.svg" : picture(id, stream);
+  const hass = { states, callWS, callService: async () => {} };
+  card.hass = hass;
+  document.body.append(card);
+  // Like HA, replace state objects instead of mutating them: the card only
+  // re-renders when a configured entity's state object changes.
+  function put(id, state, attributes) {
+    states[id] = { state, attributes: attributes ?? states[id]?.attributes ?? {} };
+  }
+  function show(status, raw) {
+    // Restart a synthetic job so the fixture can switch terminal outcomes.
+    put("sensor.status", "printing", { state_raw: 1, print_start_time: Date.now(), file: FILE });
+    card.hass = { ...hass };
+    put("sensor.status", status, { ...states["sensor.status"].attributes, state_raw: raw });
+    card.hass = { ...hass };
+  }
+  document.getElementById("success").onclick = () => { put("sensor.layer", "730"); show("completed", 2); };
+  document.getElementById("stopped").onclick = () => show("stopped", 4);
+  document.getElementById("next").onclick = () => { put("sensor.layer", "0"); show("printing", 1); };
+  document.getElementById("half").onclick = () => { put("sensor.layer", "365"); show("printing", 1); };
+  document.getElementById("pause").onclick = () => show("paused", 5);
+  document.getElementById("warning").onclick = () => {
+    const attrs = states["sensor.status"].attributes;
+    const on = !attrs.err_key;
+    put("sensor.status", states["sensor.status"].state, on
+      ? { ...attrs, err_key: 508, err_severity: "warning", err_value: "90%",
+          err_message: "Current storage space usage has reached %s, please clean up in time",
+          err_solution: "Delete files: Delete G-code files or time-lapse camera files that are no longer needed." }
+      : { ...attrs, err_key: 0, err_severity: "ok", err_message: "", err_solution: "", err_value: "" });
+    card.hass = { ...hass };
+  };
+  document.getElementById("idle").onclick = () => {
+    put("sensor.status", "idle", { state_raw: 0 });
+    put("sensor.progress", "0");
+    put("sensor.material", "0");
+    card.hass = { ...hass };
+  };
+  put("sensor.layer", "365");
+  show("printing", 1);
+</script>
