@@ -22,6 +22,10 @@ const SETTINGS = {
 function node() {
   return {
     textContent: '', value: '', checked: false, disabled: false, hidden: false, innerHTML: '', open: false,
+    dataset: {}, attrs: {},
+    setAttribute(name, value) { this.attrs[name] = value; },
+    removeAttribute(name) { delete this.attrs[name]; },
+    pause() {}, load() {},
     showModal() { this.open = true; },
     close() { this.open = false; },
   };
@@ -60,6 +64,7 @@ test('Save timelapse opens a popup offering download or the configured share', a
   await card._saveTimelapseToFolder();
   assert.deepEqual(calls.at(-2), { type: 'creality/timelapse_save', entity_id: 'sensor.status', print_start_time: 1789985709 });
   assert.equal(nodes['tl-save-note'].textContent, 'Saved as /media/nas/timelapses/2026_Part.mp4');
+  assert.match(nodes['completion-note'].textContent, /Saved to \/media\/nas\/timelapses\/2026_Part\.mp4$/);
 });
 
 test('without a folder the share choice is disabled and points to the settings', async () => {

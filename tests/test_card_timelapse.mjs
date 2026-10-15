@@ -154,6 +154,7 @@ test('missing timelapse is polled while the printer may still render it', async 
   card._syncTimelapse();
   await flush();
   assert.equal(nodes['completion-note'].textContent, 'Waiting for the printer to save the timelapse…');
+  assert.equal(nodes['completion-timelapse'].textContent, 'Waiting for timelapse…');
   assert.ok(card._timelapseTimer);
   // Past the render window the lookup is final.
   card._timelapse.since -= 6 * 60000;
@@ -164,6 +165,35 @@ test('missing timelapse is polled while the printer may still render it', async 
   assert.ok(nodes['completion-timelapse'].disabled);
   assert.equal(nodes['completion-timelapse-download'].hidden, true);
   assert.match(nodes['completion-note'].textContent, /no timelapse for this print/);
+});
+
+test('render wait counts from the job end, so reattaching does not restart it', async () => {
+  const job = { jobKey: 'job-1', startTime: 1789985709, finishedAt: Date.now() - 7 * 60000 };
+  const { card, nodes, calls } = timelapseCard([{ status: 'missing' }, { status: 'missing' }], job);
+  card._syncTimelapse();
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(card._timelapseTimer, undefined);
+  assert.equal(nodes['completion-timelapse'].textContent, 'No timelapse');
+  // Dashboard view switch: detached and attached again.
+  card._resetTimelapse();
+  card._syncTimelapse();
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal(card._timelapseTimer, undefined);
+  assert.equal(nodes['completion-timelapse'].textContent, 'No timelapse');
+});
+
+test('banner shows where auto-save copied the timelapse', async () => {
+  const { card, nodes } = timelapseCard([{ ...READY, saved_as: '/media/nas/2026-10-12_a.mp4' }]);
+  card._syncTimelapse();
+  await flush();
+  assert.match(nodes['completion-note'].textContent, /Saved to \/media\/nas\/2026-10-12_a\.mp4/);
+  const gone = timelapseCard([{ status: 'missing', saved_as: '/media/nas/b.mp4' }],
+    { jobKey: 'job-2', startTime: 1, finishedAt: Date.now() - 60 * 60000 });
+  gone.card._syncTimelapse();
+  await flush();
+  assert.equal(gone.nodes['completion-note'].textContent, 'Saved to /media/nas/b.mp4 (no longer on the printer)');
 });
 
 test('job without a start time skips the lookup', async () => {

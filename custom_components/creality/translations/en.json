@@ -62,7 +62,7 @@
       "total_layers": { "name": "Total layers" },
       "print_job_time": { "name": "Print job time" },
       "print_time_left": { "name": "Print time left" },
-      "print_time_left_estimated": { "name": "Print time left (estimated)" },
+      "print_time_left_estimated": { "name": "Estimated print time" },
       "used_material_length": { "name": "Used material length" },
       "filament_status": { "name": "Filament status" },
       "nozzle_temperature": { "name": "Nozzle temperature" },

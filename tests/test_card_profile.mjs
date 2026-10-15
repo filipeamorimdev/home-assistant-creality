@@ -120,7 +120,7 @@ test('the profile has its own tile; without one the tile explains why', () => {
 
   card._profileKey = '';
   card._drawProfile();
-  assert.equal(nodes['profile-empty'].textContent, 'No print loaded');
+  assert.equal(nodes['profile-empty'].textContent, 'No printing job running');
 });
 
 function layoutCard() {
@@ -145,8 +145,8 @@ test('print layout shows only tiles and lines whose entity is configured', () =>
   card._cfg = { camera: 'camera.p', status: 'sensor.s', preview: 'image.p', object: 'sensor.o', job_time: 'sensor.j' };
   card._syncPrintLayout('printing');
   assert.deepEqual(hiddenIds(nodes, ['camera-tile', 'profile-tile', 'preview-tile', 'file-row', 'layer-row', 'bar-row',
-    'timing-real', 'timing-creality', 'timings', 'times', 'big-pct', 'temp-chips', 'controls-panel']),
-  ['layer-row', 'bar-row', 'timing-creality', 'times', 'big-pct', 'temp-chips', 'controls-panel']);
+    'timing-real', 'timing-creality', 'timings', 'times', 'big-pct', 'controls-panel']),
+  ['layer-row', 'bar-row', 'timing-creality', 'times', 'big-pct', 'controls-panel']);
   assert.equal(nodes['media-row'].props['--media-cols'], '4');
   assert.ok(nodes['media-row'].classes.has('has-camera'));
   // The status bar sits over the camera.
@@ -167,12 +167,14 @@ test('print layout shows only tiles and lines whose entity is configured', () =>
   assert.equal(nodes['media-row'].hidden, true);
 });
 
-test('idle printers give the camera the whole row; editor options hide tiles and set its height', () => {
+test('idle printers get one placeholder tile next to the camera; editor options hide tiles and set its height', () => {
   const { card, nodes } = layoutCard();
   card._cfg = { camera: 'camera.p', status: 'sensor.s', preview: 'image.p', camera_aspect: '4:3' };
+  card._hass = { states: { 'sensor.s': { state: 'idle', attributes: { file: 'last.gcode' } } } };
   card._syncPrintLayout('idle');
-  assert.deepEqual(hiddenIds(nodes, ['camera-tile', 'profile-tile', 'preview-tile']), ['profile-tile', 'preview-tile']);
-  assert.equal(nodes['media-row'].props['--media-cols'], '2');
+  assert.deepEqual(hiddenIds(nodes, ['camera-tile', 'profile-tile', 'preview-tile']), ['preview-tile']);
+  assert.ok(nodes['profile-tile'].classes.has('tile-wide'));
+  assert.equal(nodes['media-row'].props['--media-cols'], '4');
   assert.ok(nodes['camera-tile'].classes.has('ar-4-3'));
   assert.ok(!nodes['camera-tile'].classes.has('ar-16-9'));
 

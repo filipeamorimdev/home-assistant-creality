@@ -9,7 +9,7 @@
   creality-card { display: block; }
   @media(max-width: 600px) { body { margin: 12px; } }
 </style>
-<nav><button id="success">Completed</button><button id="stopped">Stopped</button><button id="next">New print</button><button id="half">Layer 365</button><button id="pause">Pause</button><button id="warning">Storage warning</button><button id="idle">Idle</button></nav>
+<nav><button id="success">Completed</button><button id="stopped">Stopped</button><button id="next">New print</button><button id="half">Layer 365</button><button id="pause">Pause</button><button id="warning">Storage warning</button><button id="runout">Filament runout</button><button id="idle">Idle</button></nav>
 <script type="module">
   customElements.define("home-assistant", class extends HTMLElement {});
   // Stand-in for HA's icon element so buttons are visible here.
@@ -31,7 +31,7 @@
   };
   // Finished jobs have a timelapse, stopped ones none (no video file is served here).
   const timelapse = () => states["sensor.status"].attributes.state_raw === 2
-    ? { status: "ready", url: "/tests/timelapse.mp4", download_url: "/tests/timelapse.mp4", size: 5811324, duration: 9, expires_in: 3600 }
+    ? { status: "ready", url: "/tests/timelapse.mp4", download_url: "/tests/timelapse.mp4", size: 5811324, duration: 9, expires_in: 3600, saved_as: "/media/timelapses/2026-10-12_162514_Shiny_A.mp4" }
     : { status: "missing" };
   // Whole-room meter history: 85 W before the printer came online an hour ago.
   const t = Date.now() / 1000;
@@ -64,6 +64,7 @@
     "number.speed": { state: "100", attributes: { min: 50, max: 200 } },
     "fan.model": { state: "on", attributes: {} },
     "sensor.z": { state: "36.7", attributes: {} },
+    "sensor.filament": { state: "normal", attributes: {} },
     "sensor.room_power": { state: "312", attributes: { unit_of_measurement: "W", friendly_name: "workshop general Power" } },
   };
   card.setConfig({ type: "custom:creality-card", title: "Workshop printer", status: "sensor.status",
@@ -72,11 +73,14 @@
     print_energy: "sensor.room_power", camera: "camera.printer", nozzle: "sensor.nozzle",
     nozzle_target: "number.nozzle_target", bed: "sensor.bed", bed_target: "number.bed_target", time_left: "sensor.left",
     pause: "button.pause", resume: "button.resume", stop: "button.stop", home: "button.home",
-    print_tuning: "number.speed", model_fan: "fan.model", position_z: "sensor.z" });
+    print_tuning: "number.speed", model_fan: "fan.model", position_z: "sensor.z", filament: "sensor.filament" });
   // No camera proxy here: serve a still in place of the MJPEG stream.
   const picture = card._picture.bind(card);
   card._picture = (id, stream) => id.startsWith("camera.") ? "/tests/camera-still.svg" : picture(id, stream);
-  const hass = { states, callWS, callService: async () => {} };
+  const hass = { states, callWS, callService: async (domain, service, data) => {
+    // Echo number targets back like the integration would.
+    if (domain === "number" && service === "set_value") { put(data.entity_id, String(data.value)); card.hass = { ...hass }; }
+  } };
   card.hass = hass;
   document.body.append(card);
   // Like HA, replace state objects instead of mutating them: the card only
@@ -104,6 +108,12 @@
           err_message: "Current storage space usage has reached %s, please clean up in time",
           err_solution: "Delete files: Delete G-code files or time-lapse camera files that are no longer needed." }
       : { ...attrs, err_key: 0, err_severity: "ok", err_message: "", err_solution: "", err_value: "" });
+    card.hass = { ...hass };
+  };
+  document.getElementById("runout").onclick = () => {
+    const on = states["sensor.filament"].state !== "runout";
+    put("sensor.filament", on ? "runout" : "normal");
+    if (on) put("number.nozzle_target", "0");
     card.hass = { ...hass };
   };
   document.getElementById("idle").onclick = () => {

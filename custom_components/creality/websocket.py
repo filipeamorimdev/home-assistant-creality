@@ -68,19 +68,23 @@ async def ws_timelapse(
     """Timelapse the printer recorded for a job, with signed playback/download URLs.
 
     ``status``: ``ready`` | ``missing`` (not in the printer's list) |
-    ``unavailable`` (printer did not answer).
+    ``unavailable`` (printer did not answer). ``saved_as``: path the archive
+    copied it to, when it did.
     """
     coordinator = _coordinator(hass, msg["entity_id"])
     if coordinator is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Not a Creality printer entity")
         return
+    archive = coordinator.archive
+    saved = archive.saved.get(str(msg["print_start_time"]))
+    extra = {"saved_as": os.path.join(archive.folder, saved)} if saved and archive.folder else {}
     try:
         video = await coordinator.timelapse.async_find(msg["print_start_time"])
     except (ConnectionError, TimeoutError):
-        connection.send_result(msg["id"], {"status": "unavailable"})
+        connection.send_result(msg["id"], {"status": "unavailable", **extra})
         return
     if video is None:
-        connection.send_result(msg["id"], {"status": "missing"})
+        connection.send_result(msg["id"], {"status": "missing", **extra})
         return
     path = VIEW_URL.format(entry_id=coordinator.entry.entry_id, name=video["videoname"])
 
@@ -100,6 +104,7 @@ async def ws_timelapse(
             "size": video.get("size"),
             "duration": video.get("duration"),
             "expires_in": int(TIMELAPSE_URL_EXPIRY.total_seconds()),
+            **extra,
         },
     )
 

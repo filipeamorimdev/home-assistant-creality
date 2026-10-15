@@ -6,7 +6,7 @@
 # Checks the tree and tests, fast-forwards main to the branch (default: the
 # current branch), tags v<manifest version> with that version's CHANGELOG
 # section, pushes main and the tag, and creates the GitHub release with `gh`
-# when available. HACS offers updates from GitHub releases.
+# when available.
 set -euo pipefail
 
 DRY=0
@@ -54,4 +54,4 @@ if command -v gh >/dev/null 2>&1; then
 else
   echo "gh not installed: create the GitHub release for $TAG in the web UI (paste the CHANGELOG section)."
 fi
-echo "Done. In Home Assistant: HACS → Creality → Update, restart, then check Settings → Repairs."
+echo "Done. In Home Assistant: copy the new custom_components/creality, restart, then check Settings → Repairs."

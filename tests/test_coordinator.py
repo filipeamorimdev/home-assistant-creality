@@ -78,6 +78,7 @@ def make_coordinator(connected=True):
     coord.archive = SimpleNamespace(observe=lambda data: None)
     coord.timelapse = TIMELAPSE.TimelapseIndex(coord)
     coord.own_estimate = True
+    coord.plan = None
     coord._last_publish = 0.0
     coord._publish_handle = None
     coord.scheduled = []
@@ -112,33 +113,12 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(MODULE.slicer_hint_seconds("part_4h.gcode"), 4 * 3600)
         self.assertIsNone(MODULE.slicer_hint_seconds("benchy.gcode"))
 
-    def test_estimate_ignores_first_layer_rate(self):
-        # Live capture: layer 1/878 after 92 s used to blend in a ~22 h layer rate.
-        data = {
-            "printFileName": "v6 keyb_PLA_2h40m.gcode",
-            "printJobTime": 92,
-            "printProgress": 0,
-            "layer": 1,
-            "TotalLayer": 878,
-        }
-        est = MODULE.estimate_remaining_seconds(data)
-        self.assertLess(abs(est - (2 * 3600 + 40 * 60 - 92)), 60)
-
-    def test_estimate_follows_observed_rate_late(self):
-        # Running 50% slower than the 1 h hint at 60%: trust the measured rate.
-        data = {"printFileName": "p_1h0m.gcode", "printJobTime": 3240, "printProgress": 60}
-        observed = 3240 / 0.6 - 3240
-        self.assertAlmostEqual(MODULE.estimate_remaining_seconds(data), observed, delta=0.1 * observed + 60)
-
-
-    def test_estimate_ignores_layer_rate(self):
-        # Live capture 2026-10-05, 46% progress but only layer 317/878 (wide base +
-        # supports): the layer rate predicted ~10100 s, the job finished in 5123 s.
-        data = {"printFileName": "v6 keyb_PLA_2h40m.gcode", "printJobTime": 5723,
-                "printProgress": 46, "layer": 317, "TotalLayer": 878}
-        est = MODULE.estimate_remaining_seconds(data)
-        self.assertLess(abs(est - 5123), 800)  # the layer blend was off by 1656 s
-        self.assertEqual(est, MODULE.estimate_remaining_seconds({**data, "layer": 800}))
+    def test_initial_estimate(self):
+        self.assertEqual(MODULE.initial_estimate_seconds({"printFileName": "p_2h40m.gcode",
+                                                          "printLeftTime": 100}), 9600)
+        data = {"printFileName": "benchy.gcode", "printJobTime": 60, "printLeftTime": 0}
+        self.assertIsNone(MODULE.initial_estimate_seconds(data))  # printer not ready yet
+        self.assertEqual(MODULE.initial_estimate_seconds({**data, "printLeftTime": 3540}), 3600)
 
 
 class PublishTests(unittest.TestCase):
@@ -182,7 +162,7 @@ class PublishTests(unittest.TestCase):
                            "printProgress": 10})
         self.assertIsNone(coord.data["__eta_ours"])
         coord.set_own_estimate(True)
-        self.assertIsInstance(coord.data["__eta_ours"], int)
+        self.assertEqual(coord.data["__eta_ours"], 3600)
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -228,13 +208,39 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         coord._on_message({"err": {"errcode": 0, "key": 0, "value": ""}})
         self.assertEqual((coord.data["__err_key"], coord.data["__err_value"]), (0, ""))
 
-    def test_eta_only_for_active_jobs(self):
+    def test_own_estimate_is_fixed_for_the_job(self):
         coord = make_coordinator()
-        coord._on_message({"state": 1, "printFileName": "a_1h0m.gcode", "printJobTime": 600,
-                           "printProgress": 20})
-        self.assertIsInstance(coord.data["__eta_ours"], int)
+        job = {"printFileName": "benchy.gcode", "printStartTime": 5}
+        with patch.object(MODULE.time, "time", return_value=10_000.0):
+            coord._on_message({**job, "state": 1, "printJobTime": 30, "printLeftTime": 0})
+            self.assertIsNone(coord.data["__eta_ours"])  # no printer estimate yet
+            coord._on_message({"printJobTime": 60, "printLeftTime": 3540, "printProgress": 1})
+        self.assertEqual(coord.data["__eta_ours"], 3600)
+        self.assertEqual(coord.data["__eta_ours_finish"], 10_000.0 - 60 + 3600)
+        # Later printer estimates and progress do not move it.
+        with patch.object(MODULE.time, "time", return_value=12_000.0):
+            coord._on_message({"printJobTime": 2000, "printLeftTime": 4000, "printProgress": 30})
+        self.assertEqual((coord.data["__eta_ours"], coord.data["__eta_ours_finish"]), (3600, 13_540.0))
         coord._on_message({"state": 2})
+        self.assertEqual(coord.data["__eta_ours"], 3600)  # still shown on the finished job
+        coord._on_message({"state": 0, "deviceState": 0})
         self.assertIsNone(coord.data["__eta_ours"])
+        # A new job gets its own estimate.
+        coord._on_message({"state": 1, "printFileName": "b_1h0m.gcode", "printStartTime": 6,
+                           "printJobTime": 0})
+        self.assertEqual(coord.data["__eta_ours"], 3600)
+        self.assertEqual(coord.plan["job"], MODULE.job_key(coord.data))
+
+    def test_restored_own_estimate_is_kept_for_the_same_job(self):
+        coord = make_coordinator()
+        job = {"printFileName": "benchy.gcode", "printStartTime": 5}
+        coord.restore_plan({"job": MODULE.job_key(job), "total": 3000, "finish": 99.0})
+        coord._on_message({**job, "state": 1, "printJobTime": 1200, "printLeftTime": 4000})
+        self.assertEqual((coord.data["__eta_ours"], coord.data["__eta_ours_finish"]), (3000, 99.0))
+        coord = make_coordinator()
+        coord.restore_plan({"job": "old.gcode|1|", "total": 3000, "finish": 99.0})
+        coord._on_message({**job, "state": 1, "printJobTime": 1200, "printLeftTime": 4000})
+        self.assertEqual(coord.data["__eta_ours"], 5200)
 
     def test_offline_status(self):
         coord = make_coordinator(connected=False)

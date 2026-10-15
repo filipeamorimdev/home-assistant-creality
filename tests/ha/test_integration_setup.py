@@ -112,7 +112,10 @@ async def test_setup_entities_controls_and_offline(hass, fake_client, frontend_s
     own = entity_id(hass, "switch", entry, "own_estimate")
     assert hass.states.get(own).state == "off"
     await hass.services.async_call("switch", "turn_on", {"entity_id": own}, blocking=True)
-    assert hass.states.get(eta_id).state not in ("unknown", STATE_UNAVAILABLE)
+    eta = hass.states.get(eta_id)
+    # Fixed at the job's start from the filename hint (1h30m), with its finish time.
+    assert eta.state == "5400"
+    assert eta.attributes["expected_finish"]
     nozzle_target = hass.states.get(entity_id(hass, "number", entry, "nozzle_target"))
     assert float(nozzle_target.attributes["max"]) == 280  # limit read after setup
     flow = hass.states.get(entity_id(hass, "number", entry, "flow_tuning"))
@@ -438,7 +441,13 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     assert result["download_url"].startswith(f"{path}?download=1&authSig=")
     assert "elapseVideoList" not in coordinator.data
 
+    assert "saved_as" not in result
     assert (await lookup(2, 42))["status"] == "missing"
+    # Copies the archive made are reported, also once the printer dropped the video.
+    coordinator.archive.folder = "/media/timelapses"
+    coordinator.archive.saved["42"] = "2026-10-12_162514_part.mp4"
+    assert (await lookup(21, 42))["saved_as"] == "/media/timelapses/2026-10-12_162514_part.mp4"
+    coordinator.archive.saved.clear()
     coordinator.timelapse._fetched_at = None
     client.send_json = AsyncMock(side_effect=ConnectionError("closed"))
     assert (await lookup(3, FRAME["printStartTime"]))["status"] == "unavailable"

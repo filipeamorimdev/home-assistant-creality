@@ -59,16 +59,12 @@ function isIdleStatus(status) {
   return ["idle", "standby", "unknown", "unavailable", ""].includes(String(status ?? "").toLowerCase());
 }
 
-/** "210.3 / 210 °C" for the row-2 temperature chips (target only when configured). */
-function tempChipText(current, target) {
-  const now = num(current, 1);
-  const goal = parseFloat(target);
-  return Number.isFinite(goal) ? `${now} / ${Math.round(goal)} °C` : `${now} °C`;
-}
+const NO_JOB_TEXT = "No printing job running";
+const ACTIVE_STATUSES = ["printing", "paused", "pausing", "resuming", "processing"];
 
 /** Profile tile text while no G-code silhouette is available. */
 function profileEmptyText(jobKey, status) {
-  if (!jobKey) return "No print loaded";
+  if (!jobKey) return NO_JOB_TEXT;
   if (status === "loading" || status === undefined) return "Reading G-code…";
   if (status === "unavailable") return "No G-code profile for this print";
   if (status === "failed") return "G-code profile failed; retrying";
@@ -122,7 +118,7 @@ const LABELS = {
   total_layers: "Total layers",
   job_time: "Print job time",
   time_left: "Time left (printer)",
-  time_left_estimated: "Time left (estimated)",
+  time_left_estimated: "Estimated print time",
   used_material: "Used material length",
   filament: "Filament status",
   printer_switch: "Printer power switch",
@@ -141,13 +137,15 @@ const LABELS = {
   stop: "Stop print",
   nozzle: "Nozzle temperature",
   nozzle_target: "Nozzle target",
+  filament_change_temp: "Replace filament temperature",
   bed: "Bed temperature",
   bed_target: "Bed target",
 };
 
 const HELPERS = {
   camera_aspect: "Height of the camera tile; Wide (16:9) when not set.",
-  hide_tiles: "Ticked tiles are not shown next to the camera. While the printer is idle the camera always takes the whole row.",
+  filament_change_temp: "Nozzle target set by Replace filament and the runout banner; 240 °C when not set.",
+  hide_tiles: "Ticked tiles are not shown next to the camera. With no print job they merge into one 'No printing job running' tile.",
 };
 
 function esc(value) {
@@ -281,9 +279,18 @@ function printerAlert(attrs) {
   const label = severity === "error" ? "Printer error" : "Printer warning";
   return {
     severity,
+    id: `${key}|${value}`,
     title: `${label} ${key}: ${message}`,
     detail: String(attrs.err_solution || "").trim(),
   };
+}
+
+/** Default nozzle target (°C) to unload/load filament; card option `filament_change_temp`. */
+const FILAMENT_CHANGE_TEMP = 240;
+
+/** True while the filament status entity reports a runout (`materialStatus == 1`). */
+function isFilamentRunout(state) {
+  return String(state?.state ?? "").toLowerCase() === "runout";
 }
 
 function isOn(state) {
@@ -305,12 +312,15 @@ const TIMELAPSE_RETRY_MS = 30000;
 const CAMERA_SUPPORT_STREAM = 2;
 const DELETED_LIMIT = 500;
 const FILAMENT_CUSTOM = "__custom__";
-/** Panels collapsed on first load / when no saved preference. */
+/**
+ * Panels collapsed when the card is built. Panels set to true always start
+ * collapsed; only the others remember (in localStorage) that they were collapsed.
+ */
 const DEFAULT_COLLAPSED = {
   print: false,
   controls: true,
   log: false,
-  temp: false,
+  temp: true,
 };
 const FILAMENT_TYPES = [
   "PLA",
@@ -409,7 +419,30 @@ function estimateEnergyCost(energyKwh, costPerKwh) {
 
 function fmtMoney(value, currency) {
   if (!Number.isFinite(value)) return "—";
+  // Tiny test prints cost fractions of a cent; "€0.00" would read as "free".
+  if (value > 0 && value < 0.005) return `< ${currency || "€"}0.01`;
   return `${currency || "€"}${value.toFixed(2)}`;
+}
+
+/** Saved "Time spent" with units ("1m 38s", "2h 40m"); free text is kept as typed. */
+function fmtSpent(row) {
+  const s = Number(row?.timeSeconds);
+  if (row?.timeSeconds == null || row.timeSeconds === "" || !Number.isFinite(s) || s < 0) {
+    return row?.timeLabel && row.timeLabel !== "—" ? row.timeLabel : null;
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.round(s % 60);
+  if (h > 0) return m ? `${h}h ${m}m` : `${h}h`;
+  if (m > 0) return sec ? `${m}m ${sec}s` : `${m}m`;
+  return `${sec}s`;
+}
+
+/** Printer job id (printStartTime) of a saved row; older rows only carry it inside jobKey. */
+function rowStartTime(row) {
+  const raw = row?.startTime ?? String(row?.jobKey || "").split("|")[1];
+  const n = Number(raw);
+  return raw !== "" && raw != null && Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function fmtWeight(grams) {
@@ -424,6 +457,31 @@ function fmtEnergy(kwh) {
   return `${kwh.toFixed(kwh < 1 ? 3 : 2)} kWh`;
 }
 
+/**
+ * Whole video as a blob URL, so the player can seek freely (the printer
+ * ignores Range requests). ``onProgress`` gets 0..1 when the size is known.
+ */
+async function fetchVideoBlobUrl(url, signal, sizeHint, onProgress) {
+  const resp = await fetch(url, { signal, credentials: "same-origin" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const total = Number(resp.headers.get("Content-Length")) || Number(sizeHint) || 0;
+  const chunks = [];
+  let received = 0;
+  const reader = resp.body?.getReader?.();
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total) onProgress?.(Math.min(1, received / total));
+    }
+  } else {
+    chunks.push(await resp.blob());
+  }
+  return URL.createObjectURL(new Blob(chunks, { type: "video/mp4" }));
+}
+
 /** Read-only definition list for one saved print (Print details panel). */
 function printDetailsHtml(p) {
   const finite = (v) => Number.isFinite(parseFloat(v));
@@ -432,13 +490,13 @@ function printDetailsHtml(p) {
   const energyCost = Number.isFinite(p.estimatedEnergyCost) ? p.estimatedEnergyCost : null;
   const total = filamentCost != null || energyCost != null ? (filamentCost || 0) + (energyCost || 0) : null;
   const energy = finite(p.energyKwh)
-    ? `${fmtEnergy(parseFloat(p.energyKwh))}${p.energyQuality ? ` (${p.energyQuality})` : ""}`
+    ? `${fmtEnergy(parseFloat(p.energyKwh))}${p.energyQuality === "partial" ? " (partial)" : ""}`
     : null;
   const items = [
     ["File", p.file || "Untitled print", true],
     ["Ended", Number.isNaN(ended.getTime()) ? null : ended.toLocaleString(), true],
     ["Result", prettyStatus(p.result)],
-    ["Time spent", p.timeLabel && p.timeLabel !== "—" ? p.timeLabel : null],
+    ["Time spent", fmtSpent(p)],
     ["Layers", p.layers || null],
     ["Progress", Number.isFinite(p.progress) ? `${num(p.progress, 0)}%` : null],
     ["Filament used", finite(p.used) ? fmtUsed(p.used, p.usedUnit) : null],
@@ -724,6 +782,10 @@ class CrealityCard extends HTMLElement {
             { name: "model_fan", selector: { entity: { domain: "fan" } } },
             { name: "case_fan", selector: { entity: { domain: "fan" } } },
             { name: "side_fan", selector: { entity: { domain: "fan" } } },
+            {
+              name: "filament_change_temp",
+              selector: { number: { min: 150, max: 350, step: 1, mode: "box", unit_of_measurement: "°C" } },
+            },
             { name: "position_x", selector: { entity: { domain: "sensor" } } },
             { name: "position_y", selector: { entity: { domain: "sensor" } } },
             { name: "position_z", selector: { entity: { domain: "sensor" } } },
@@ -832,15 +894,25 @@ class CrealityCard extends HTMLElement {
     this._profileTimer = undefined;
     this._profileKey = undefined;
     this._resetTimelapse();
+    this._resetDetailTimelapse();
   }
 
   /** Printer-reported error or warning (`err.key`), described by the integration's error DB. */
   _syncPrinterAlert() {
     const el = this._root.getElementById("printer-alert");
     if (!el) return;
-    const alert = printerAlert(this._st("status")?.attributes);
-    el.hidden = !alert;
-    if (!alert) return;
+    const attrs = this._st("status")?.attributes;
+    const alert = printerAlert(attrs);
+    let dismissed = this._loadDismissedAlert();
+    // Forget a dismissal only once the printer explicitly reports no error, so the
+    // same warning shows again when it recurs (a reconnect without `err` keeps it).
+    if (!alert && dismissed && attrs?.err && typeof attrs.err === "object" && !Number(attrs.err.key)) {
+      this._saveDismissedAlert(null);
+      dismissed = null;
+    }
+    el.hidden = !alert || alert.id === dismissed;
+    if (el.hidden) return;
+    el.dataset.alertId = alert.id;
     el.classList.toggle("is-error", alert.severity === "error");
     this._root.getElementById("printer-alert-icon")?.setAttribute(
       "icon", alert.severity === "error" ? "mdi:alert-octagon" : "mdi:alert");
@@ -848,31 +920,114 @@ class CrealityCard extends HTMLElement {
     this._setText("printer-alert-detail", alert.detail);
   }
 
+  _dismissPrinterAlert() {
+    const id = this._root.getElementById("printer-alert")?.dataset.alertId;
+    if (!id) return;
+    this._saveDismissedAlert(id);
+    this._syncPrinterAlert();
+  }
+
+  _dismissedAlertStorageKey() {
+    return `creality-card.alert-dismissed.${this._cfg?.status || "default"}`;
+  }
+
+  /** `key|value` of the printer alert the user closed (kept across reloads), or null. */
+  _loadDismissedAlert() {
+    try {
+      return localStorage.getItem(this._dismissedAlertStorageKey());
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  _saveDismissedAlert(id) {
+    try {
+      if (id) localStorage.setItem(this._dismissedAlertStorageKey(), id);
+      else localStorage.removeItem(this._dismissedAlertStorageKey());
+    } catch (_err) {
+      /* ignore quota / private mode */
+    }
+  }
+
+  /** Filament runout banner, with a button that heats the nozzle for a filament swap. */
+  _syncFilamentAlert() {
+    const el = this._root.getElementById("filament-alert");
+    if (!el) return;
+    const runout = isFilamentRunout(this._st("filament"));
+    // A closed runout banner stays closed until this runout ends (not remembered across reloads).
+    if (!runout) this._filamentAlertDismissed = false;
+    el.hidden = !runout || Boolean(this._filamentAlertDismissed);
+    const temp = this._filamentChangeTemp();
+    const target = parseFloat(this._val("nozzle_target"));
+    const heating = Number.isFinite(target) && target >= temp;
+    const button = this._root.getElementById("filament-heat");
+    if (button) {
+      button.hidden = el.hidden || !this._cfg.nozzle_target;
+      button.disabled = heating || Boolean(this._heatBusy);
+      button.textContent = heating
+        ? `Nozzle set to ${Math.round(target)} °C`
+        : `Heat nozzle to ${temp} °C`;
+    }
+    // "Replace filament" in Controls: same action, available at any time.
+    const replace = this._root.getElementById("filament-change");
+    if (replace) {
+      replace.hidden = !this._cfg.nozzle_target;
+      replace.disabled = heating || Boolean(this._heatBusy);
+      replace.title = heating
+        ? `Nozzle set to ${Math.round(target)} °C`
+        : `Set the nozzle target to ${temp} °C`;
+    }
+  }
+
+  /** Nozzle target for a filament swap: card option, else 240 °C. */
+  _filamentChangeTemp() {
+    const temp = parseFloat(this._cfg.filament_change_temp);
+    return Number.isFinite(temp) && temp > 0 ? temp : FILAMENT_CHANGE_TEMP;
+  }
+
+  async _heatForFilamentChange() {
+    if (this._heatBusy || !this._cfg.nozzle_target) return;
+    this._heatBusy = true;
+    this._syncFilamentAlert();
+    try {
+      await this._setNumber(this._cfg.nozzle_target, this._filamentChangeTemp());
+    } finally {
+      this._heatBusy = false;
+      this._syncFilamentAlert();
+    }
+  }
+
   /** Real / Creality / Ours time boxes; "Ours" only while the integration estimate is enabled. */
   _syncTimings(status) {
     const stLower = String(status).toLowerCase();
-    const jobActive = ["printing", "paused", "pausing", "resuming", "processing"].includes(stLower);
+    const jobActive = ACTIVE_STATUSES.includes(stLower);
     const jobDone = stLower === "completed";
     const elapsedSec = parseDurationSeconds(this._val("job_time"));
     const crealityLeftSec = parseDurationSeconds(this._val("time_left"));
-    // Blended estimate computed by the integration (progress rate + slicer hint).
-    // Opt-in: the sensor is unavailable while the "Own time estimate" switch is off.
+    // Whole-job estimate the integration fixed when the print started, and its
+    // finish time; not updated during the print. Opt-in: the sensor is
+    // unavailable while the "Own time estimate" switch is off.
     const oursSt = this._st("time_left_estimated");
     const oursShown = Boolean(oursSt) && oursSt.state !== "unavailable";
-    const ourLeftSec = oursShown ? parseDurationSeconds(oursSt.state) : null;
+    const ourTotalSec = oursShown ? parseDurationSeconds(oursSt.state) : null;
+    const ourFinish = oursShown && oursSt.attributes?.expected_finish
+      ? new Date(oursSt.attributes.expected_finish) : null;
 
     const realLabel = fmtDuration(elapsedSec ?? this._val("job_time"));
     let crealityLabel = "—";
     let oursLabel = "—";
-    if (jobDone) {
-      crealityLabel = "0s";
-      oursLabel = "0s";
-    } else if (jobActive) {
+    if (jobDone) crealityLabel = "0s";
+    else if (jobActive) {
       crealityLabel = crealityLeftSec != null ? fmtDuration(crealityLeftSec) : fmtDuration(this._val("time_left"));
-      oursLabel = ourLeftSec != null ? fmtDuration(ourLeftSec) : crealityLabel;
     }
-    // Finish clock time from the best remaining-time estimate.
-    const leftSec = jobActive ? (ourLeftSec ?? crealityLeftSec) : null;
+    if ((jobActive || jobDone) && ourTotalSec != null) {
+      oursLabel = fmtDuration(ourTotalSec);
+      if (ourFinish && !Number.isNaN(ourFinish.getTime())) {
+        oursLabel += ` · ETA ${fmtClock(ourFinish, this._hass?.locale)}`;
+      }
+    }
+    // Finish clock time from the printer's live remaining time.
+    const leftSec = jobActive ? crealityLeftSec : null;
     let etaText = "";
     if (jobDone) etaText = "Done";
     else if (leftSec != null) {
@@ -885,6 +1040,16 @@ class CrealityCard extends HTMLElement {
     this._setText("time-ours", oursLabel);
     const oursEl = this._root.getElementById("timing-ours");
     if (oursEl) oursEl.hidden = !oursShown;
+  }
+
+  /**
+   * No job: idle (the printer keeps the last file loaded after a print), or no
+   * file and nothing printing. Job details are hidden; tiles show a placeholder.
+   */
+  _noJob(status = this._val("status", "")) {
+    const st = this._st("status");
+    if (!st) return false;
+    return isIdleStatus(status) || (!st.attributes?.file && !ACTIVE_STATUSES.includes(String(status).toLowerCase()));
   }
 
   _st(key) {
@@ -1114,9 +1279,11 @@ class CrealityCard extends HTMLElement {
           .panel-h .chevron {
             --mdc-icon-size: 18px;
             color: var(--cp-muted);
+            flex: none;
+            transform: rotate(180deg);
             transition: transform 0.15s ease;
           }
-          .panel.is-collapsed .chevron { transform: rotate(-90deg); }
+          .panel.is-collapsed .chevron { transform: none; }
           .panel.is-collapsed .panel-h { border-bottom: none; }
           .panel.is-collapsed .panel-b { display: none; }
           .panel-b { padding: 12px; }
@@ -1145,10 +1312,14 @@ class CrealityCard extends HTMLElement {
           .tile > .thumb { flex: 1 1 auto; min-height: 0; }
           .tile-camera { grid-column: span 2; }
           .media-row:not(.has-camera) .tile { aspect-ratio: 1; max-height: 360px; }
+          /* No job: one placeholder tile in place of profile + thumbnail. */
+          .tile-wide { grid-column: span 2; }
+          .media-row:not(.has-camera) .tile.tile-wide { aspect-ratio: 2; }
           @container creality (max-width: 600px) {
             .media-row { grid-template-columns: repeat(var(--media-cols-narrow, 2), minmax(0, 1fr)); }
             .tile-camera { grid-column: 1 / -1; }
             .tile:not(.tile-camera) { aspect-ratio: 1; }
+            .tile.tile-wide { aspect-ratio: 2; }
           }
           .tile-camera { --cam-ar: 16 / 9; }
           .tile-camera.ar-4-3 { --cam-ar: 4 / 3; }
@@ -1185,6 +1356,7 @@ class CrealityCard extends HTMLElement {
           .cam-pct { font-size: 13px; font-variant-numeric: tabular-nums; }
           .cam-layer { opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .ring { width: 22px; height: 22px; flex: 0 0 auto; transform: rotate(-90deg); }
+          .ring[hidden] { display: none; }
           .ring circle { fill: none; stroke-width: 4; }
           .ring-bg { stroke: #ffffff33; }
           .bar-slot .ring-bg { stroke: var(--cp-border); }
@@ -1244,26 +1416,12 @@ class CrealityCard extends HTMLElement {
           .thumb.empty { text-align: center; padding: 8px; box-sizing: border-box; cursor: default; }
           .meta { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
           .progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 16px; flex-wrap: wrap; }
-          .progress-head[hidden], .temp-chips[hidden], .temp-chip[hidden], .coord[hidden], .coords[hidden], .fan-row[hidden], .ctrl-row[hidden], .field[hidden], .icon-btn[hidden], .panel[hidden] { display: none; }
+          .progress-head[hidden], .coord[hidden], .coords[hidden], .fan-row[hidden], .ctrl-row[hidden], .field[hidden], .icon-btn[hidden], .panel[hidden] { display: none; }
           .big-pct { font-size: 30px; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }
           .big-pct[hidden] { display: none; }
           .progress-eta { font-size: 14px; color: var(--cp-muted); font-variant-numeric: tabular-nums; }
           .progress-eta b { color: var(--cp-text); }
-          .temp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-          .temp-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 4px 10px;
-            border-radius: 999px;
-            background: var(--cp-inset);
-            border: 1px solid var(--cp-border);
-            font-size: 12px;
-            color: var(--cp-muted);
-            cursor: pointer;
-          }
-          .temp-chip .dot { margin-right: 2px; }
-          .temp-chip b { color: var(--cp-text); font-variant-numeric: tabular-nums; font-weight: 600; }
+          .meta-head[hidden] { display: none; }
           .meta-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; }
           .meta-head .kv { min-width: 0; overflow-wrap: anywhere; }
           .kv[hidden], .bar[hidden], .times[hidden], .timing-row[hidden] { display: none; }
@@ -1364,6 +1522,7 @@ class CrealityCard extends HTMLElement {
             align-items: center;
           }
           .ctrl-row, .fan-row { margin-bottom: 12px; }
+          .ctrl-row .act { flex: 0 0 auto; min-height: 34px; padding: 6px 12px; }
           .field {
             display: flex;
             align-items: center;
@@ -1414,6 +1573,7 @@ class CrealityCard extends HTMLElement {
             font-weight: 600;
           }
           .act[disabled] { opacity: 0.35; cursor: default; }
+          .act[hidden] { display: none; }
           .act.stop:hover { border-color: #e5484d; color: #e5484d; }
           .camera-body {
             flex: 1 1 auto;
@@ -1558,6 +1718,9 @@ class CrealityCard extends HTMLElement {
           }
           .completion[hidden] { display: none; }
           .wrap.offline .layout, .wrap.offline .completion, .wrap.offline .printer-alert { display: none; }
+          .printer-alert .act { flex: 0 0 auto; margin-left: auto; align-self: center; }
+          .printer-alert .act[hidden] { display: none; }
+          .printer-alert.is-error .act { border-color: #8f2a2e; }
           .printer-alert {
             display: flex; gap: 10px; align-items: flex-start;
             margin-bottom: 12px; padding: 10px 12px; border-radius: 8px;
@@ -1567,10 +1730,16 @@ class CrealityCard extends HTMLElement {
           .printer-alert.is-error { background: #3b1d1f; border-color: #e5484d; }
           .printer-alert ha-icon { flex: 0 0 auto; color: #fc6d09; --mdc-icon-size: 20px; }
           .printer-alert.is-error ha-icon { color: #e5484d; }
-          .printer-alert-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+          .printer-alert-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
           .printer-alert-title { font-weight: 600; font-size: 14px; }
           .printer-alert-detail { font-size: 12px; color: var(--cp-muted); }
           .printer-alert-detail:empty { display: none; }
+          .printer-alert .alert-close {
+            flex: 0 0 auto; align-self: flex-start; display: inline-flex; padding: 2px; margin: -2px -4px 0 0;
+            border: 0; border-radius: 6px; background: none; color: var(--cp-muted); cursor: pointer;
+          }
+          .printer-alert .alert-close:hover { color: var(--cp-text); background: #ffffff14; }
+          .printer-alert .alert-close ha-icon { color: inherit; --mdc-icon-size: 18px; }
           .offline-notice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
           .offline-notice[hidden], #printer-power[hidden] { display: none; }
           #printer-loading { width: 16px; height: 16px; border: 2px solid var(--cp-border); border-top-color: var(--cp-accent); border-radius: 50%; animation: printer-spin 0.8s linear infinite; }
@@ -1693,6 +1862,14 @@ class CrealityCard extends HTMLElement {
             background: var(--cp-inset);
           }
           .log-detail div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+          .log-tl[hidden], .log-tl video[hidden] { display: none; }
+          .log-tl { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--cp-border); }
+          .log-tl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+          .log-tl-text { flex: 1 1 180px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+          .log-tl-label { font-size: 11px; color: var(--cp-muted); }
+          #log-tl-text { font-size: 13px; color: var(--cp-text); overflow-wrap: anywhere; }
+          .log-tl-row .act { flex: 0 0 auto; min-height: 36px; padding: 6px 12px; }
+          .log-tl video { margin-top: 10px; }
           .log-detail dt { font-size: 11px; color: var(--cp-muted); }
           .log-detail dd {
             margin: 0;
@@ -1760,6 +1937,20 @@ class CrealityCard extends HTMLElement {
               <span class="printer-alert-title" id="printer-alert-title"></span>
               <span class="printer-alert-detail" id="printer-alert-detail"></span>
             </div>
+            <button class="alert-close" id="printer-alert-close" type="button" title="Dismiss" aria-label="Dismiss printer alert">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <div class="printer-alert is-error" id="filament-alert" role="alert" hidden>
+            <ha-icon icon="mdi:printer-3d-nozzle-alert"></ha-icon>
+            <div class="printer-alert-body">
+              <span class="printer-alert-title">Filament runout</span>
+              <span class="printer-alert-detail">The filament sensor reports no filament. Heat the nozzle, then unload and load new filament.</span>
+            </div>
+            <button class="act" id="filament-heat" type="button" hidden></button>
+            <button class="alert-close" id="filament-alert-close" type="button" title="Dismiss" aria-label="Dismiss filament runout alert">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
           </div>
           <section class="completion" id="completion-banner" hidden aria-label="Print result">
             <h3 id="completion-title" role="status" aria-live="polite"></h3>
@@ -1776,8 +1967,9 @@ class CrealityCard extends HTMLElement {
           <div class="layout">
             <section class="panel panel-print" data-panel="print">
               <div class="panel-h" role="button" tabindex="0" aria-expanded="true">
-                <span class="panel-title"><ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon> Printing information</span>
+                <span class="panel-title">Printing information</span>
                 <span class="badge" id="status-badge">—</span>
+                <ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon>
               </div>
               <div class="panel-b">
                 <div class="media-row" id="media-row">
@@ -1820,19 +2012,15 @@ class CrealityCard extends HTMLElement {
                     <b class="big-pct" id="big-pct">—</b>
                     <span class="progress-eta" id="progress-eta"></span>
                   </div>
-                  <div class="meta-head">
+                  <div class="meta-head" id="meta-head">
                     <div class="kv" id="file-row">File: <b id="file">—</b></div>
                     <div class="kv" id="layer-row">Layer: <b id="layer">—</b></div>
                   </div>
                   <div class="bar" id="bar-row"><span id="bar"></span></div>
-                  <div class="timing-row" id="timings" title="Real = print job time. Creality = printer ETA. Ours = integration estimate (progress rate + slicer hint), shown when the Own time estimate switch is on.">
+                  <div class="timing-row" id="timings" title="Real = print job time. Creality = printer time left. Ours = whole-job estimate and finish time fixed when the print started (slicer hint, else printer estimate), shown when the Own time estimate switch is on.">
                     <div class="timing" id="timing-real" title="Elapsed printing time reported by the printer"><span>Real</span><b id="time-real">—</b></div>
                     <div class="timing" id="timing-creality" title="Time remaining estimated by the printer"><span>Creality</span><b id="time-creality">—</b></div>
-                    <div class="timing" id="timing-ours" title="Time remaining estimated from elapsed time and progress, blended with the filename duration hint or printer estimate"><span>Ours</span><b id="time-ours" class="eta">—</b></div>
-                  </div>
-                  <div class="temp-chips" id="temp-chips">
-                    <span class="temp-chip" id="chip-nozzle" data-more="nozzle"><span class="dot nozzle"></span>Nozzle <b id="chip-nozzle-val">—</b></span>
-                    <span class="temp-chip" id="chip-bed" data-more="bed"><span class="dot bed"></span>Bed <b id="chip-bed-val">—</b></span>
+                    <div class="timing" id="timing-ours" title="Print time estimated when the job started (filename duration hint, else printer estimate) and the finish time it predicts; not updated during the print"><span>Ours</span><b id="time-ours" class="eta">—</b></div>
                   </div>
                   <div class="times" id="times" data-more="used_material">—</div>
                   <div class="times" id="filament"></div>
@@ -1852,7 +2040,8 @@ class CrealityCard extends HTMLElement {
             <div class="col col-main">
               <section class="panel" data-panel="controls" id="controls-panel">
                 <div class="panel-h" role="button" tabindex="0" aria-expanded="true">
-                  <span class="panel-title"><ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon> Controls</span>
+                  <span class="panel-title">Controls</span>
+                  <ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon>
                 </div>
                 <div class="panel-b">
                   <div class="ctrl-row" id="ctrl-row">
@@ -1865,6 +2054,9 @@ class CrealityCard extends HTMLElement {
                     <label class="field" id="flow-field">Flow:
                       <input id="flow" type="number" min="50" max="150" step="1" /> %
                     </label>
+                    <button class="act" id="filament-change" type="button" hidden>
+                      <ha-icon icon="mdi:printer-3d-nozzle-heat"></ha-icon><span>Replace filament</span>
+                    </button>
                   </div>
                   <div class="fan-row" id="fan-row">
                     <label class="field">Model Fan
@@ -1889,7 +2081,8 @@ class CrealityCard extends HTMLElement {
             <div class="col col-side">
               <section class="panel" data-panel="temp">
                 <div class="panel-h" role="button" tabindex="0" aria-expanded="true">
-                  <span class="panel-title"><ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon> Temperature</span>
+                  <span class="panel-title">Temperature</span>
+                  <ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon>
                 </div>
                 <div class="panel-b">
                   <table class="temps">
@@ -1919,7 +2112,8 @@ class CrealityCard extends HTMLElement {
 
           <section class="panel panel-log" data-panel="log">
             <div class="panel-h" role="button" tabindex="0" aria-expanded="true">
-              <span class="panel-title"><ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon> Print history</span>
+              <span class="panel-title">Print history</span>
+              <ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon>
             </div>
             <div class="panel-b">
               <div class="log-summary" id="log-summary"></div>
@@ -1937,6 +2131,19 @@ class CrealityCard extends HTMLElement {
             <h3 id="log-modal-title">Save print</h3>
             <div id="log-view" hidden>
               <dl class="log-detail" id="log-detail"></dl>
+              <div class="log-tl" id="log-tl" hidden>
+                <div class="log-tl-row">
+                  <div class="log-tl-text">
+                    <span class="log-tl-label">Timelapse</span>
+                    <span id="log-tl-text" role="status">Checking…</span>
+                  </div>
+                  <button class="act" id="log-tl-play" type="button" hidden aria-controls="log-tl-video">Play</button>
+                  <button class="act" id="log-tl-download" type="button" hidden>
+                    <ha-icon icon="mdi:download"></ha-icon> Download
+                  </button>
+                </div>
+                <video class="completion-video" id="log-tl-video" controls playsinline preload="none" hidden></video>
+              </div>
               <div class="modal-acts">
                 <button class="act" id="log-close" type="button">Close</button>
                 <button class="act" id="log-edit" type="button">Edit</button>
@@ -2114,6 +2321,8 @@ class CrealityCard extends HTMLElement {
     on("tl-save-settings", "click", () => this._openTimelapseSettings());
     on("tl-save-close", "click", () => this._root.getElementById("tl-save")?.close());
     on("tl-line-settings", "click", () => this._openTimelapseSettings());
+    on("log-tl-play", "click", () => this._toggleDetailTimelapse());
+    on("log-tl-download", "click", () => this._downloadDetailTimelapse());
     on("tl-settings-cancel", "click", () => this._root.getElementById("tl-settings")?.close());
     on("tl-settings-save", "click", () => this._saveTimelapseSettings());
     on("tl-suggest", "click", (ev) => {
@@ -2175,6 +2384,13 @@ class CrealityCard extends HTMLElement {
       this._profileAxis = this._profileAxis === "y" ? "x" : "y";
       this._drawProfile();
     });
+    on("filament-heat", "click", () => this._heatForFilamentChange());
+    on("filament-change", "click", () => this._heatForFilamentChange());
+    on("printer-alert-close", "click", () => this._dismissPrinterAlert());
+    on("filament-alert-close", "click", () => {
+      this._filamentAlertDismissed = true;
+      this._syncFilamentAlert();
+    });
     on("fan-model", "click", () => this._toggleFan(this._cfg.model_fan));
     on("fan-case", "click", () => this._toggleFan(this._cfg.case_fan));
     on("fan-side", "click", () => this._toggleFan(this._cfg.side_fan));
@@ -2214,7 +2430,7 @@ class CrealityCard extends HTMLElement {
   }
 
   _collapsedStorageKey() {
-    return `creality-card.collapsed.v2.${this._cfg?.status || this._cfg?.title || "default"}`;
+    return `creality-card.collapsed.v3.${this._cfg?.status || this._cfg?.title || "default"}`;
   }
 
   _loadCollapsed() {
@@ -2229,6 +2445,7 @@ class CrealityCard extends HTMLElement {
   _saveCollapsed() {
     const state = {};
     this._root.querySelectorAll(".panel[data-panel]").forEach((panel) => {
+      if (DEFAULT_COLLAPSED[panel.dataset.panel]) return;
       state[panel.dataset.panel] = panel.classList.contains("is-collapsed");
     });
     try {
@@ -2242,7 +2459,7 @@ class CrealityCard extends HTMLElement {
     const saved = this._loadCollapsed();
     this._root.querySelectorAll(".panel[data-panel]").forEach((panel) => {
       const key = panel.dataset.panel;
-      const collapsed = saved && key in saved ? !!saved[key] : !!DEFAULT_COLLAPSED[key];
+      const collapsed = DEFAULT_COLLAPSED[key] || (saved && key in saved ? !!saved[key] : false);
       panel.classList.toggle("is-collapsed", collapsed);
       panel.querySelector(".panel-h")?.setAttribute("aria-expanded", String(!collapsed));
     });
@@ -2419,6 +2636,7 @@ class CrealityCard extends HTMLElement {
     this._setText("log-modal-title", "Print details");
     const detail = this._root.getElementById("log-detail");
     if (detail) detail.innerHTML = printDetailsHtml(p);
+    this._loadDetailTimelapse(p);
     this._setPrintPanelMode("view");
     const panel = this._root.getElementById("log-modal");
     panel?.classList.add("open");
@@ -2426,9 +2644,151 @@ class CrealityCard extends HTMLElement {
     this._root.getElementById("log-edit")?.focus({ preventScroll: true });
   }
 
+  /** Timelapse of a saved print, looked up on the printer by its job id. */
+  _resetDetailTimelapse() {
+    const state = this._detailTl;
+    this._detailTl = null;
+    state?.abort?.abort();
+    if (state?.blobUrl) URL.revokeObjectURL(state.blobUrl);
+    this._drawDetailTimelapse();
+  }
+
+  async _loadDetailTimelapse(row) {
+    this._resetDetailTimelapse();
+    const start = rowStartTime(row);
+    if (!start || !this._cfg?.status || !this._hass?.callWS) return;
+    const state = { rowId: row.id, status: "checking", open: false };
+    this._detailTl = state;
+    this._drawDetailTimelapse();
+    let res;
+    try {
+      res = await this._hass.callWS({ type: "creality/timelapse", entity_id: this._cfg.status, print_start_time: start });
+    } catch (_err) {
+      res = { status: "error" };
+    }
+    if (this._detailTl !== state) return;
+    state.status = ["ready", "missing", "unavailable"].includes(res?.status) ? res.status : "error";
+    state.result = res || null;
+    state.fetchedAt = Date.now();
+    this._drawDetailTimelapse();
+  }
+
+  async _toggleDetailTimelapse() {
+    const state = this._detailTl;
+    if (state?.status !== "ready") return;
+    if (state.open) {
+      state.open = false;
+      state.abort?.abort();
+      this._drawDetailTimelapse();
+      return;
+    }
+    state.open = true;
+    state.loadError = false;
+    this._drawDetailTimelapse();
+    if (!state.blobUrl) {
+      const row = this._prints.find((p) => p.id === state.rowId);
+      // Signed URLs last an hour; ask again for an old answer.
+      if (Date.now() - state.fetchedAt > 30 * 60 * 1000 && row) {
+        await this._loadDetailTimelapse(row);
+        return this._toggleDetailTimelapse();
+      }
+      state.abort = new AbortController();
+      state.progress = 0;
+      try {
+        const blobUrl = await fetchVideoBlobUrl(state.result.url, state.abort.signal, state.result.size, (progress) => {
+          state.progress = progress;
+          this._drawDetailTimelapse();
+        });
+        if (this._detailTl !== state) {
+          URL.revokeObjectURL(blobUrl);
+          return;
+        }
+        state.blobUrl = blobUrl;
+      } catch (_err) {
+        if (this._detailTl === state && !state.abort.signal.aborted) {
+          state.loadError = true;
+          state.open = false;
+        }
+      } finally {
+        state.abort = undefined;
+        state.progress = undefined;
+      }
+      if (this._detailTl !== state) return;
+      this._drawDetailTimelapse();
+      if (!state.open || !state.blobUrl) return;
+    }
+    this._root.getElementById("log-tl-video")?.play?.()?.catch?.(() => {});
+  }
+
+  _downloadDetailTimelapse() {
+    const state = this._detailTl;
+    const result = state?.status === "ready" ? state.result : null;
+    if (!result?.download_url) return;
+    const link = document.createElement("a");
+    link.href = state.blobUrl || result.download_url;
+    link.download = result.filename || "";
+    link.click();
+  }
+
+  _drawDetailTimelapse() {
+    const box = this._root?.getElementById("log-tl");
+    if (!box) return;
+    const state = this._detailTl;
+    box.hidden = !state;
+    const play = this._root.getElementById("log-tl-play");
+    const download = this._root.getElementById("log-tl-download");
+    const video = this._root.getElementById("log-tl-video");
+    const ready = state?.status === "ready";
+    const result = state?.result || {};
+    const savedAs = result.saved_as ? `Saved to ${result.saved_as}` : "";
+    let text = "Checking…";
+    if (ready) {
+      text = [Number.isFinite(result.duration) ? fmtDuration(result.duration) : null,
+        Number.isFinite(result.size) ? `${(result.size / 1e6).toFixed(1)} MB` : null,
+        savedAs || null].filter(Boolean).join(" · ") || "Ready";
+      if (state.open && !state.blobUrl) {
+        text = Number.isFinite(state.progress) && state.progress > 0
+          ? `Loading… ${Math.round(state.progress * 100)}%`
+          : "Loading…";
+      } else if (state.loadError) {
+        text = "Couldn't load the timelapse from the printer. Try again.";
+      }
+    } else if (state?.status === "missing") {
+      text = savedAs
+        ? `${savedAs} (no longer on the printer)`
+        : "The printer has no timelapse for this print (timelapse off, or the print was very short).";
+    } else if (state?.status === "unavailable") {
+      text = "Couldn't reach the printer to look for the timelapse.";
+    } else if (state?.status === "error") {
+      text = "Couldn't look up the timelapse.";
+    }
+    this._setText("log-tl-text", text);
+    if (play) {
+      play.hidden = !ready;
+      play.textContent = state?.open ? "Hide" : "Play";
+      play.setAttribute("aria-expanded", String(ready && !!state.open));
+    }
+    if (download) download.hidden = !ready;
+    if (video) {
+      const src = ready && state.open ? state.blobUrl || "" : "";
+      if ((video.dataset.src || "") !== src) {
+        video.dataset.src = src;
+        if (src) {
+          video.src = src;
+        } else {
+          video.pause?.();
+          video.removeAttribute("src");
+          video.load?.();
+        }
+      }
+      video.hidden = !src;
+    }
+  }
+
   _editPrintFromDetails() {
     const existing = this._prints.find((p) => p.id === this._editingId);
     if (!existing) return;
+    this._resetDetailTimelapse();
     this._setText("log-modal-title", "Edit print");
     this._writePrintForm({ ...existing });
     this._refreshPrintEstimate();
@@ -2461,6 +2821,7 @@ class CrealityCard extends HTMLElement {
   }
 
   _closePrintModal() {
+    this._resetDetailTimelapse();
     this._root.getElementById("log-modal")?.classList.remove("open");
     this._editingId = null;
     this._formPreview = "";
@@ -2873,7 +3234,10 @@ class CrealityCard extends HTMLElement {
     if (key !== (this._timelapse?.key || "")) {
       this._resetTimelapse();
       if (key) {
-        this._timelapse = { key, status: "checking", since: Date.now(), open: false };
+        // Measure the render wait from the job's end, not from when this card
+        // (re)attached: view switches and reloads must not restart it.
+        const ended = Number(this._completedJob?.finishedAt);
+        this._timelapse = { key, status: "checking", since: Number.isFinite(ended) ? ended : Date.now(), open: false };
         this._fetchTimelapse(key);
       }
     }
@@ -2901,6 +3265,8 @@ class CrealityCard extends HTMLElement {
     if (this._timelapse !== state) return null; // Job changed or card detached meanwhile.
     state.status = ["ready", "missing", "unavailable"].includes(res?.status) ? res.status : "error";
     state.result = state.status === "ready" ? res : null;
+    // Folder copy made by auto-save (or the save dialog), kept across later lookups.
+    if (res?.saved_as) state.savedAs = res.saved_as;
     state.fetchedAt = Date.now();
     let wait = 0;
     if (state.status === "missing" && !res.final && Date.now() - state.since < TIMELAPSE_WAIT_MS) wait = TIMELAPSE_POLL_MS;
@@ -2955,28 +3321,15 @@ class CrealityCard extends HTMLElement {
       state.abort = new AbortController();
       state.progress = 0;
       try {
-        const resp = await fetch(result.url, { signal: state.abort.signal, credentials: "same-origin" });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const total = Number(resp.headers.get("Content-Length")) || Number(result.size) || 0;
-        const chunks = [];
-        let received = 0;
-        const reader = resp.body?.getReader?.();
-        if (reader) {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            received += value.length;
-            if (total) {
-              state.progress = Math.min(1, received / total);
-              this._drawTimelapse();
-            }
-          }
-        } else {
-          chunks.push(await resp.blob());
+        const blobUrl = await fetchVideoBlobUrl(result.url, state.abort.signal, result.size, (progress) => {
+          state.progress = progress;
+          this._drawTimelapse();
+        });
+        if (this._timelapse !== state) {
+          URL.revokeObjectURL(blobUrl);
+          return false;
         }
-        if (this._timelapse !== state) return false;
-        state.blobUrl = URL.createObjectURL(new Blob(chunks, { type: "video/mp4" }));
+        state.blobUrl = blobUrl;
         return true;
       } catch (_err) {
         if (this._timelapse === state && !state.abort.signal.aborted) {
@@ -3064,11 +3417,13 @@ class CrealityCard extends HTMLElement {
         type: "creality/timelapse_save", entity_id: this._cfg.status, print_start_time: start,
       });
       this._setText("tl-save-note", `Saved as ${res.path}`);
+      if (this._timelapse && Number(this._completedJob?.startTime) === start) this._timelapse.savedAs = res.path;
     } catch (err) {
       this._setText("tl-save-note", `Couldn't save: ${err?.message || "unknown error"}`);
     } finally {
       this._tlSaving = false;
       this._drawTimelapseSaveChoices();
+      this._drawTimelapse();
       this._loadTimelapseSettings();
     }
   }
@@ -3134,6 +3489,7 @@ class CrealityCard extends HTMLElement {
     const video = this._root?.getElementById("completion-video");
     const state = this._timelapse;
     const ready = state?.status === "ready" && !!state.result;
+    const savedAs = state?.savedAs ? `Saved to ${state.savedAs}` : "";
     let label = "Checking timelapse…";
     let note = "";
     if (ready) {
@@ -3141,7 +3497,8 @@ class CrealityCard extends HTMLElement {
       const { duration, size } = state.result;
       note = ["Timelapse",
         Number.isFinite(duration) ? fmtDuration(duration) : null,
-        Number.isFinite(size) ? `${(size / 1e6).toFixed(1)} MB` : null].filter(Boolean).join(" · ");
+        Number.isFinite(size) ? `${(size / 1e6).toFixed(1)} MB` : null,
+        savedAs || null].filter(Boolean).join(" · ");
       if (state.open && !state.blobUrl) {
         note = Number.isFinite(state.progress) && state.progress > 0
           ? `Loading timelapse… ${Math.round(state.progress * 100)}%`
@@ -3150,10 +3507,13 @@ class CrealityCard extends HTMLElement {
         note = "Couldn't load the timelapse from the printer. Try again.";
       }
     } else if (state?.waiting) {
+      label = "Waiting for timelapse…";
       note = "Waiting for the printer to save the timelapse…";
     } else if (state?.status === "missing") {
       label = "No timelapse";
-      note = "The printer has no timelapse for this print (timelapse off, or the print was very short).";
+      note = savedAs
+        ? `${savedAs} (no longer on the printer)`
+        : "The printer has no timelapse for this print (timelapse off, or the print was very short).";
     } else if (state?.status === "unavailable") {
       label = "Timelapse unavailable";
       note = "Couldn't reach the printer to look for the timelapse. Retrying…";
@@ -3286,6 +3646,8 @@ class CrealityCard extends HTMLElement {
 
   _writePrintForm(row) {
     this._formJobKey = row.jobKey || "";
+    this._formStartTime = rowStartTime(row);
+    this._formEnded = row.ended;
     this._formEnergyQuality = row.energyQuality || "partial";
     this._formEnergyBaselineW = row.energyBaselineW;
     this._setText("log-energy-quality", `Energy measurement: ${this._formEnergyQuality}${baselineLabel({ baselineW: row.energyBaselineW })}`);
@@ -3326,10 +3688,15 @@ class CrealityCard extends HTMLElement {
     const estimatedCost = estimateCost(weightG, costPerKg);
     const estimatedEnergyCost = estimateEnergyCost(energyKwh, costPerKwh);
     const endedRaw = val("log-ended");
-    const ended = endedRaw ? new Date(endedRaw).toISOString() : new Date().toISOString();
+    // The field has minute precision; keep the exact end time unless it was edited.
+    const original = this._formEnded ? new Date(this._formEnded) : null;
+    const ended = endedRaw && original && !Number.isNaN(original.getTime()) && endedRaw === toLocalDateTimeValue(original)
+      ? original.toISOString()
+      : endedRaw ? new Date(endedRaw).toISOString() : new Date().toISOString();
     return {
       id: this._editingId || newPrintId(),
       jobKey: this._formJobKey || "",
+      startTime: this._formStartTime ?? null,
       energyQuality: this._formEnergyQuality || "partial",
       energyBaselineW: this._formEnergyBaselineW,
       savedAt: new Date().toISOString(),
@@ -3452,7 +3819,7 @@ class CrealityCard extends HTMLElement {
           const totalCost = filamentCost + energyCost;
           const bits = [
             prettyStatus(p.result),
-            p.timeLabel && p.timeLabel !== "—" ? p.timeLabel : null,
+            fmtSpent(p),
             Number.isFinite(parseFloat(p.used)) ? fmtUsed(p.used, p.usedUnit) : null,
             p.filamentType || null,
             Number.isFinite(parseFloat(p.energyKwh)) ? fmtEnergy(parseFloat(p.energyKwh)) : null,
@@ -3543,6 +3910,7 @@ class CrealityCard extends HTMLElement {
       badge.className = `badge ${statusClass(status)}`;
     }
     this._syncPrinterAlert();
+    this._syncFilamentAlert();
 
     this._syncPrintLayout(status);
 
@@ -3578,13 +3946,16 @@ class CrealityCard extends HTMLElement {
     const filament = this._val("filament");
     const filEl = this._root.getElementById("filament");
     if (filEl) {
-      const show = filament && !["unknown", "unavailable", "normal", ""].includes(String(filament).toLowerCase());
+      // A runout has its own banner at the top.
+      const show = filament && !["unknown", "unavailable", "normal", "runout", ""].includes(String(filament).toLowerCase());
       filEl.textContent = show ? `Filament: ${filament}` : "";
     }
 
     this._trackEnergy();
 
-    this._syncMedia("preview", this._cfg.preview, false, "No preview");
+    // No job: the image entity may still hold the last job's thumbnail.
+    const noJob = this._noJob();
+    this._syncMedia("preview", noJob ? "" : this._cfg.preview, false, noJob ? NO_JOB_TEXT : "No preview");
     this._syncLayerOverlay();
     this._syncProfile();
     this._syncCameraViews();
@@ -3610,8 +3981,6 @@ class CrealityCard extends HTMLElement {
 
     this._setText("nozzle-now", `${num(this._val("nozzle"), 2)} °C`);
     this._setText("bed-now", `${num(this._val("bed"), 2)} °C`);
-    this._setText("chip-nozzle-val", tempChipText(this._val("nozzle"), this._cfg.nozzle_target && this._val("nozzle_target")));
-    this._setText("chip-bed-val", tempChipText(this._val("bed"), this._cfg.bed_target && this._val("bed_target")));
     this._setInput("nozzle-target", this._val("nozzle_target"));
     this._setInput("bed-target", this._val("bed_target"));
 
@@ -3629,9 +3998,10 @@ class CrealityCard extends HTMLElement {
     if (!mount) return;
     const url = this._picture(entityId, stream);
     if (!url) {
-      if (!mount.querySelector(".empty")) {
-        mount.innerHTML = `<div class="empty">${esc(emptyLabel)}</div>`;
-      }
+      if (mountId === "preview") mount.classList.add("empty"); // Muted text after an image was shown.
+      const empty = mount.querySelector(".empty");
+      if (!empty) mount.innerHTML = `<div class="empty">${esc(emptyLabel)}</div>`;
+      else if (empty.textContent !== emptyLabel) empty.textContent = emptyLabel;
       return;
     }
     let img = mount.querySelector("img");
@@ -3738,7 +4108,10 @@ class CrealityCard extends HTMLElement {
     const cfg = this._cfg;
     const show = (id, visible) => {
       const el = this._root.getElementById(id);
-      if (el) el.hidden = !visible;
+      if (!el) return;
+      el.hidden = !visible;
+      // SVG elements have no hidden property; set the attribute (CSS hides it).
+      if (el.namespaceURI === "http://www.w3.org/2000/svg") el.toggleAttribute("hidden", !visible);
     };
     const hiddenTiles = Array.isArray(cfg.hide_tiles) ? cfg.hide_tiles : [];
     // The G-code profile is requested through the print status entity.
@@ -3747,12 +4120,13 @@ class CrealityCard extends HTMLElement {
       profile: !!cfg.status && !hiddenTiles.includes("profile"),
       preview: !!cfg.preview && !hiddenTiles.includes("preview"),
     };
-    // No job to show: the camera takes the whole row.
-    const idle = tiles.camera && !!cfg.status && isIdleStatus(status);
-    if (idle) tiles.profile = tiles.preview = false;
+    // No job: both tiles would say so; the profile tile alone spans their slots.
+    const noJob = this._noJob(status);
+    const merged = noJob && tiles.profile && tiles.preview;
     show("camera-tile", tiles.camera);
     show("profile-tile", tiles.profile);
-    show("preview-tile", tiles.preview);
+    show("preview-tile", tiles.preview && !merged);
+    this._root.getElementById("profile-tile")?.classList.toggle("tile-wide", merged);
     const row = this._root.getElementById("media-row");
     if (row) {
       const units = (tiles.camera ? 2 : 0) + (tiles.profile ? 1 : 0) + (tiles.preview ? 1 : 0);
@@ -3773,30 +4147,30 @@ class CrealityCard extends HTMLElement {
     const barHome = tiles.camera ? camTile : this._root.getElementById("bar-slot");
     if (camBar && barHome && camBar.parentNode !== barHome) barHome.append(camBar);
     show("camera-expand", tiles.camera);
-    show("ring", !!cfg.progress);
-    show("cam-pct", !!cfg.progress);
+    show("ring", !noJob && !!cfg.progress);
+    show("cam-pct", !noJob && !!cfg.progress);
     show("cam-badge", !!cfg.status);
-    show("cam-layer", !!cfg.layer);
+    show("cam-layer", !noJob && !!cfg.layer);
     show("cam-bar", tiles.camera || !!(cfg.progress || cfg.status || cfg.pause || cfg.resume || cfg.stop));
 
-    show("progress-head", !!(cfg.progress || cfg.time_left || cfg.time_left_estimated));
+    // No job: percentage, file, layer, bar, estimates and material used are hidden.
+    show("progress-head", !noJob && !!(cfg.progress || cfg.time_left || cfg.time_left_estimated));
     show("big-pct", !!cfg.progress);
-    show("file-row", !!cfg.object);
-    show("layer-row", !!cfg.layer);
-    show("bar-row", !!cfg.progress);
+    show("file-row", !noJob && !!cfg.object);
+    show("layer-row", !noJob && !!cfg.layer);
+    show("meta-head", !noJob && !!(cfg.object || cfg.layer));
+    show("bar-row", !noJob && !!cfg.progress);
     show("timing-real", !!cfg.job_time);
     show("timing-creality", !!cfg.time_left);
-    show("timings", !!(cfg.job_time || cfg.time_left || cfg.time_left_estimated));
-    show("times", !!cfg.used_material);
-    show("chip-nozzle", !!cfg.nozzle);
-    show("chip-bed", !!cfg.bed);
-    show("temp-chips", !!(cfg.nozzle || cfg.bed));
+    show("timings", !noJob && !!(cfg.job_time || cfg.time_left || cfg.time_left_estimated));
+    show("times", !noJob && !!cfg.used_material);
 
     // Controls: speed/flow, home, fans and X/Y/Z, each only when configured.
     show("home", !!cfg.home);
     show("speed-field", !!(cfg.print_tuning || cfg.print_speed));
     show("flow-field", !!cfg.flow_tuning);
-    show("ctrl-row", !!(cfg.home || cfg.print_tuning || cfg.print_speed || cfg.flow_tuning));
+    show("filament-change", !!cfg.nozzle_target);
+    show("ctrl-row", !!(cfg.home || cfg.print_tuning || cfg.print_speed || cfg.flow_tuning || cfg.nozzle_target));
     const fans = { "fan-model": "model_fan", "fan-case": "case_fan", "fan-side": "side_fan" };
     for (const [id, key] of Object.entries(fans)) {
       const field = this._root.getElementById(id)?.closest?.(".field");
@@ -3807,7 +4181,7 @@ class CrealityCard extends HTMLElement {
     show("coord-y", !!cfg.position_y);
     show("coord-z", !!cfg.position_z);
     show("coords", !!(cfg.position_x || cfg.position_y || cfg.position_z));
-    show("controls-panel", !!(cfg.home || cfg.print_tuning || cfg.print_speed || cfg.flow_tuning ||
+    show("controls-panel", !!(cfg.home || cfg.print_tuning || cfg.print_speed || cfg.flow_tuning || cfg.nozzle_target ||
       cfg.model_fan || cfg.case_fan || cfg.side_fan || cfg.position_x || cfg.position_y || cfg.position_z));
   }
 
@@ -3955,7 +4329,7 @@ class CrealityCard extends HTMLElement {
   _syncProfile() {
     // Hidden in the editor: nothing to show, so do not ask the integration.
     const hidden = Array.isArray(this._cfg?.hide_tiles) && this._cfg.hide_tiles.includes("profile");
-    const key = hidden ? "" : this._profileJobKey();
+    const key = hidden || this._noJob() ? "" : this._profileJobKey();
     if (key !== this._profileKey) {
       this._profileKey = key;
       this._profile = null;
