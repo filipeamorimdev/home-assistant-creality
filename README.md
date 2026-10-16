@@ -1,4 +1,4 @@
-# Creality KE Firmware
+# Home Assistant Creality KE Firmware Integration
 
 > This is an **unofficial**, community-built integration made as a weekend project. It is not made, endorsed or supported by Creality (Shenzhen Creality 3D Technology Co., Ltd.). The Creality name is a trademark of its owner and is used only to identify the printers this integration works with.
 
