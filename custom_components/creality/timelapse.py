@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import PurePosixPath
 import re
 import time
@@ -26,6 +27,8 @@ LIST_KEY = "elapseVideoList"
 LIST_REQUEST = {"method": "get", "params": {"reqElapseVideoList": 1}}
 VIDEO_URL = "http://{host}/downloads/video/{name}"
 VIEW_URL = "/api/creality/timelapse/{entry_id}/{name}"
+# Copy the archive saved into the timelapse folder, by job start id.
+SAVED_VIEW_URL = "/api/creality/timelapse_saved/{entry_id}/{start}.mp4"
 LIST_TIMEOUT = 8.0
 LIST_MAX_AGE = 10.0
 _VIDEO_NAME = re.compile(r"^\d{1,20}\.mp4$")
@@ -50,6 +53,12 @@ def find_video(entries: list[dict[str, Any]], start_time: Any) -> dict[str, Any]
         if _start_id(entry.get("id")) == start and _VIDEO_NAME.match(str(entry.get("videoname") or "")):
             return entry
     return None
+
+
+def _disposition(request: web.Request, filename: str) -> str:
+    disposition = "attachment" if request.query.get("download") else "inline"
+    fallback = filename.encode("ascii", "replace").decode().replace('"', "_").replace("?", "_")
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
 def download_name(entry: dict[str, Any]) -> str:
@@ -150,12 +159,7 @@ class TimelapseView(HomeAssistantView):
                 if header in upstream.headers:
                     response.headers[header] = upstream.headers[header]
             response.content_type = "video/mp4"
-            disposition = "attachment" if request.query.get("download") else "inline"
-            filename = download_name(entry)
-            fallback = filename.encode("ascii", "replace").decode().replace('"', "_").replace("?", "_")
-            response.headers["Content-Disposition"] = (
-                f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
-            )
+            response.headers["Content-Disposition"] = _disposition(request, download_name(entry))
             await response.prepare(request)
             try:
                 async for chunk in upstream.content.iter_chunked(64 * 1024):
@@ -166,3 +170,29 @@ class TimelapseView(HomeAssistantView):
                 return response
             await response.write_eof()
             return response
+
+
+class SavedTimelapseView(HomeAssistantView):
+    """Serve a job's copy from the timelapse folder (works while the printer is off)."""
+
+    url = SAVED_VIEW_URL
+    name = "api:creality:timelapse_saved"
+    requires_auth = True
+
+    async def get(self, request: web.Request, entry_id: str, start: str) -> web.StreamResponse:
+        hass = request.app[KEY_HASS]
+        coordinator = hass.data.get(DOMAIN, {}).get(entry_id)
+        if coordinator is None or not start.isdigit() or len(start) > 20:
+            raise web.HTTPNotFound
+        # Only files matching the job inside the configured folder are served.
+        path = await coordinator.archive.async_find_saved(start)
+        if path is None:
+            raise web.HTTPNotFound
+        # FileResponse answers Range requests, so the player can seek.
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Disposition": _disposition(request, os.path.basename(path)),
+            },
+        )

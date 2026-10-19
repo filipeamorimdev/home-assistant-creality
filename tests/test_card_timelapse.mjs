@@ -189,11 +189,13 @@ test('banner shows where auto-save copied the timelapse', async () => {
   card._syncTimelapse();
   await flush();
   assert.match(nodes['completion-note'].textContent, /Saved to \/media\/nas\/2026-10-12_a\.mp4/);
-  const gone = timelapseCard([{ status: 'missing', saved_as: '/media/nas/b.mp4' }],
+  // A copy deleted from the folder is no longer reported.
+  const gone = timelapseCard([{ status: 'missing' }, { status: 'missing' }],
     { jobKey: 'job-2', startTime: 1, finishedAt: Date.now() - 60 * 60000 });
   gone.card._syncTimelapse();
-  await flush();
-  assert.equal(gone.nodes['completion-note'].textContent, 'Saved to /media/nas/b.mp4 (no longer on the printer)');
+  gone.card._timelapse.savedAs = '/media/nas/b.mp4';
+  await gone.card._fetchTimelapse('job-2');
+  assert.match(gone.nodes['completion-note'].textContent, /no timelapse for this print/);
 });
 
 test('job without a start time skips the lookup', async () => {

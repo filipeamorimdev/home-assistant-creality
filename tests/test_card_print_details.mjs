@@ -108,16 +108,28 @@ test('details look up the timelapse by job id, play it whole and drop it on clos
   assert.equal(nodes['log-tl-video'].hidden, true);
 });
 
-test('missing timelapse explains why or points at the saved copy', async () => {
-  const { card, nodes } = detailsCard([{ status: 'missing' }, { status: 'missing', saved_as: '/media/tl/a.mp4' }]);
+test('missing timelapse explains why', async () => {
+  const { card, nodes } = detailsCard([{ status: 'missing' }]);
   card._showPrintDetails('p1');
   await flush();
   assert.match(nodes['log-tl-text'].textContent, /no timelapse for this print/);
   assert.equal(nodes['log-tl-play'].hidden, true);
   assert.equal(nodes['log-tl-download'].hidden, true);
+});
+
+test('saved folder copy plays while the printer is offline', async () => {
+  const saved = { status: 'ready', source: 'folder', url: '/api/creality/timelapse_saved/e/1.mp4?authSig=a',
+    download_url: '/api/creality/timelapse_saved/e/1.mp4?download=1&authSig=b', size: 2e6, duration: null,
+    expires_in: 3600, filename: '2026-10-12_162514_a.mp4', saved_as: '/media/tl/2026-10-12_162514_a.mp4' };
+  const { card, nodes } = detailsCard([saved]);
   card._showPrintDetails('p1');
   await flush();
-  assert.equal(nodes['log-tl-text'].textContent, 'Saved to /media/tl/a.mp4 (no longer on the printer)');
+  assert.equal(nodes['log-tl-text'].textContent, '2.0 MB · Saved to /media/tl/2026-10-12_162514_a.mp4');
+  assert.equal(nodes['log-tl-play'].hidden, false);
+  assert.equal(nodes['log-tl-download'].hidden, false);
+  card._detailTl.loadError = true;
+  card._drawDetailTimelapse();
+  assert.equal(nodes['log-tl-text'].textContent, "Couldn't load the saved timelapse. Try again.");
 });
 
 test('rows without a job id skip the lookup', async () => {

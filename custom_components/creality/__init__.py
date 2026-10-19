@@ -20,7 +20,7 @@ from . import errors, websocket
 from .const import CARD_URL, CARD_VERSION, CONF_HOST, DOMAIN, LIVE_OPTIONS
 from .coordinator import CrealityCoordinator
 from .legacy_card import async_check_legacy_resources
-from .timelapse import TimelapseView
+from .timelapse import SavedTimelapseView, TimelapseView
 from .timelapse_archive import archive_store_key
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         frontend.add_extra_js_url(hass, f"{CARD_URL}?v={CARD_VERSION}")
         websocket.async_register(hass)
         hass.http.register_view(TimelapseView())
+        hass.http.register_view(SavedTimelapseView())
         # Dashboard resources are loaded by then; flag leftovers of the old card.
         async_at_started(hass, async_check_legacy_resources)
     return True

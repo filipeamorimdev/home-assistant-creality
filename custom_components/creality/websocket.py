@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_TIMELAPSE_AUTO_SAVE, CONF_TIMELAPSE_FOLDER, DOMAIN
-from .timelapse import VIEW_URL, download_name
+from .timelapse import SAVED_VIEW_URL, VIEW_URL, download_name, find_video
 from .timelapse_archive import check_folder, folder_suggestions
 
 # The card asks again before reusing a URL older than half of this.
@@ -65,38 +65,65 @@ def ws_print_profile(
 async def ws_timelapse(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Timelapse the printer recorded for a job, with signed playback/download URLs.
+    """Timelapse of a job, with signed playback/download URLs.
 
     ``status``: ``ready`` | ``missing`` (not in the printer's list) |
-    ``unavailable`` (printer did not answer). ``saved_as``: path the archive
-    copied it to, when it did.
+    ``unavailable`` (printer did not answer). A copy found in the timelapse
+    folder is served instead of the printer's (``source: "folder"``), also
+    while the printer is off; local files can be seeked.
+    ``saved_as``: that copy's path, only while it exists on disk.
     """
     coordinator = _coordinator(hass, msg["entity_id"])
     if coordinator is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Not a Creality printer entity")
         return
-    archive = coordinator.archive
-    saved = archive.saved.get(str(msg["print_start_time"]))
-    extra = {"saved_as": os.path.join(archive.folder, saved)} if saved and archive.folder else {}
-    try:
-        video = await coordinator.timelapse.async_find(msg["print_start_time"])
-    except (ConnectionError, TimeoutError):
-        connection.send_result(msg["id"], {"status": "unavailable", **extra})
-        return
-    if video is None:
-        connection.send_result(msg["id"], {"status": "missing", **extra})
-        return
-    path = VIEW_URL.format(entry_id=coordinator.entry.entry_id, name=video["videoname"])
+    start = msg["print_start_time"]
+    entry_id = coordinator.entry.entry_id
 
     def sign(url: str) -> str:
         return async_sign_path(
             hass, url, TIMELAPSE_URL_EXPIRY, refresh_token_id=connection.refresh_token_id
         )
 
+    saved = await coordinator.archive.async_find_saved(start)
+    if saved:
+        try:
+            size = (await hass.async_add_executor_job(os.stat, saved)).st_size
+        except OSError:
+            size = None
+        # Printer details (duration, G-code) only from the cached list: no network wait.
+        video = find_video(coordinator.timelapse.entries, start) or {}
+        path = SAVED_VIEW_URL.format(entry_id=entry_id, start=start)
+        connection.send_result(
+            msg["id"],
+            {
+                "status": "ready",
+                "source": "folder",
+                "url": sign(path),
+                "download_url": sign(f"{path}?download=1"),
+                "file": video.get("gcodename"),
+                "filename": os.path.basename(saved),
+                "size": size,
+                "duration": video.get("duration"),
+                "expires_in": int(TIMELAPSE_URL_EXPIRY.total_seconds()),
+                "saved_as": saved,
+            },
+        )
+        return
+    try:
+        video = await coordinator.timelapse.async_find(start)
+    except (ConnectionError, TimeoutError):
+        connection.send_result(msg["id"], {"status": "unavailable"})
+        return
+    if video is None:
+        connection.send_result(msg["id"], {"status": "missing"})
+        return
+    path = VIEW_URL.format(entry_id=entry_id, name=video["videoname"])
     connection.send_result(
         msg["id"],
         {
             "status": "ready",
+            "source": "printer",
             "url": sign(path),
             "download_url": sign(f"{path}?download=1"),
             "file": video.get("gcodename"),
@@ -104,7 +131,6 @@ async def ws_timelapse(
             "size": video.get("size"),
             "duration": video.get("duration"),
             "expires_in": int(TIMELAPSE_URL_EXPIRY.total_seconds()),
-            **extra,
         },
     )
 

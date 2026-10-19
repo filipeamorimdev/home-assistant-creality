@@ -286,7 +286,8 @@ ends; the card keeps looking for five minutes. Very short prints, or prints
 with timelapse turned off on the printer, have none. Videos stay on the
 printer unless you [save them to a folder](#saving-timelapses) (the
 browser's copy is dropped when the banner clears or the page closes), and saved
-print history does not include them.
+print history does not include them. Once a copy is in the folder, Play and
+Download use that file instead of the printer's, also while the printer is off.
 
 ### Saving timelapses
 
@@ -318,6 +319,9 @@ Folders outside `/media` must be listed in
   is offline the copy is retried every 5 minutes for up to 24 hours.
 - Only jobs that end while the option is on are saved; older videos on the
   printer are not copied.
+- The card only reports a copy while the file is really in the folder (looked
+  up by the recorded name, else by its `<start time>_` prefix); a deleted or
+  moved file is no longer offered.
 - The diagnostic sensor **Timelapse saving** (`off`, `idle`, `waiting`,
   `saving`, `saved`, `failed`) carries `folder`, `auto_save`, `last_file`, `last_saved`, `last_error` and
   `pending`, e.g. for a notification automation.
@@ -364,10 +368,10 @@ stored copy, so several browsers can save without overwriting each other.
 
 *Click a saved print in **Print history** to open its details: thumbnail, result, time, layers, filament, energy and every cost. **Edit** reopens the form to correct it.*
 
-The details also show the job's **timelapse** while the printer still has it
-(it keeps roughly the last 50), with **Play** and **Download**, and the file
-name when auto-save copied it to your folder. Very short prints have no
-timelapse; the printer skips them.
+The details also show the job's **timelapse** with **Play** and **Download**:
+the copy in your timelapse folder when there is one (also while the printer is
+off), otherwise the printer's while it still has it (it keeps roughly the last
+50). Very short prints have no timelapse; the printer skips them.
 
 ## Time estimates
 
@@ -416,7 +420,7 @@ An unchanged scrape leaves the file untouched.
 - The thumbnail layer overlay is an approximation; saved thumbnails have no overlay.
 - G-code profiles need the printer's download endpoint and are not available for USB prints.
 - Energy downtime is not reconstructed; gaps mark totals partial.
-- Saved history plays timelapses from the printer only; once the printer drops a video, the details just name the auto-saved file. Auto-save copies only jobs that end while it is enabled.
+- Saved history plays timelapses from the timelapse folder or the printer; a video in neither (deleted, folder changed, never saved) is gone. Auto-save copies only jobs that end while it is enabled.
 - Creality Cloud and CFS-specific features are out of scope.
 
 ## Protocol notes

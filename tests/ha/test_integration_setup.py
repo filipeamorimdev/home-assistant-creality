@@ -410,10 +410,11 @@ TIMELAPSES = [
 ]
 
 
-async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioclient_mock, aiohttp_client, socket_enabled):
+async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioclient_mock, aiohttp_client, socket_enabled, tmp_path):
     from aiohttp import web
     from homeassistant.components.http import KEY_HASS
-    from custom_components.creality.timelapse import VIEW_URL, TimelapseView
+    from custom_components.creality.timelapse import SAVED_VIEW_URL, VIEW_URL, SavedTimelapseView, TimelapseView
+    from custom_components.creality.timelapse_archive import archive_name
     from custom_components.creality.websocket import ws_timelapse
 
     entry = await setup_entry(hass)
@@ -441,16 +442,31 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     assert result["download_url"].startswith(f"{path}?download=1&authSig=")
     assert "elapseVideoList" not in coordinator.data
 
+    assert result["source"] == "printer"
     assert "saved_as" not in result
     assert (await lookup(2, 42))["status"] == "missing"
-    # Copies the archive made are reported, also once the printer dropped the video.
-    coordinator.archive.folder = "/media/timelapses"
+    # A record whose file is gone from the folder is not reported.
+    coordinator.archive.folder = str(tmp_path)
     coordinator.archive.saved["42"] = "2026-10-12_162514_part.mp4"
-    assert (await lookup(21, 42))["saved_as"] == "/media/timelapses/2026-10-12_162514_part.mp4"
+    assert (await lookup(21, 42)) == {"status": "missing"}
     coordinator.archive.saved.clear()
     coordinator.timelapse._fetched_at = None
     client.send_json = AsyncMock(side_effect=ConnectionError("closed"))
-    assert (await lookup(3, FRAME["printStartTime"]))["status"] == "unavailable"
+    assert (await lookup(3, FRAME["printStartTime"])) == {"status": "unavailable"}
+
+    # A copy on disk is served from the folder, also while the printer is offline,
+    # found by the recorded name or by the job's start-time prefix.
+    stamp = archive_name({"id": FRAME["printStartTime"]})[:-4]
+    (tmp_path / f"{stamp}_part.mp4.part").write_bytes(b"partial")
+    (tmp_path / f"{stamp}_part.mp4").write_bytes(b"saved-video")
+    result = await lookup(4, FRAME["printStartTime"])
+    saved_path = SAVED_VIEW_URL.format(entry_id=entry.entry_id, start=FRAME["printStartTime"])
+    assert result["status"] == "ready" and result["source"] == "folder"
+    assert result["saved_as"] == str(tmp_path / f"{stamp}_part.mp4")
+    assert result["filename"] == f"{stamp}_part.mp4"
+    assert result["size"] == 11
+    assert result["url"].startswith(f"{saved_path}?authSig=")
+    assert result["download_url"].startswith(f"{saved_path}?download=1&authSig=")
 
     # The view streams listed videos from the printer and forwards Range requests.
     coordinator.timelapse.entries = TIMELAPSES
@@ -477,6 +493,22 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     assert (await http.get(VIEW_URL.format(entry_id="nope", name="7.mp4"))).status == 404
     assert (await http.get(VIEW_URL.format(entry_id=entry.entry_id, name="x.txt"))).status == 404
     assert aioclient_mock.call_count == calls
+
+    # The folder copy is served with Range support; other names never are.
+    saved_view = SavedTimelapseView()
+    app = web.Application()
+    app[KEY_HASS] = hass
+    app.router.add_get(SAVED_VIEW_URL, lambda request: saved_view.get(request, **request.match_info))
+    http = await aiohttp_client(app)
+    resp = await http.get(f"{saved_path}?download=1", headers={"Range": "bytes=0-4"})
+    assert resp.status == 206
+    assert await resp.read() == b"saved"
+    assert resp.headers["Content-Type"] == "video/mp4"
+    assert resp.headers["Content-Disposition"].startswith(f'attachment; filename="{stamp}_part.mp4"')
+    assert (await http.get(SAVED_VIEW_URL.format(entry_id=entry.entry_id, start=42))).status == 404
+    assert (await http.get(SAVED_VIEW_URL.format(entry_id="nope", start=FRAME["printStartTime"]))).status == 404
+    (tmp_path / f"{stamp}_part.mp4").unlink()
+    assert (await http.get(saved_path)).status == 404
 
 
 def test_timelapse_archive_name():

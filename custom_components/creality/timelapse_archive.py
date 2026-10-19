@@ -51,6 +51,33 @@ def archive_name(entry: dict[str, Any]) -> str:
     return f"{stamp}_{stem}.mp4" if stem else f"{stamp}.mp4"
 
 
+def find_saved(folder: str | None, recorded: str | None, start_time: Any) -> str | None:
+    """Path of a job's copy in ``folder`` if it is (still) there. Run in the executor.
+
+    Tries the name the archive recorded, then any ``<local start>[_<stem>].mp4``
+    (manual saves, records dropped or lost).
+    """
+    start = _start_id(start_time)
+    if not folder or start is None:
+        return None
+    names = [recorded] if recorded else []
+    stamp = archive_name({"id": start})[:-4]
+    if not (recorded and os.path.isfile(os.path.join(folder, recorded))):
+        try:
+            with os.scandir(folder) as entries:
+                names.extend(sorted(
+                    e.name for e in entries
+                    if e.name == f"{stamp}.mp4" or (e.name.startswith(f"{stamp}_") and e.name.endswith(".mp4"))
+                ))
+        except OSError:
+            return None
+    for name in names:
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def check_folder(hass: HomeAssistant, raw: str | None) -> tuple[str, str | None]:
     """Normalized folder and an error key; creates the folder. Run in the executor."""
     folder = (raw or "").strip()
@@ -238,6 +265,11 @@ class TimelapseArchiver:
         finally:
             self._store.async_delay_save(self._data, 1)
             self._schedule(delay)
+
+    async def async_find_saved(self, start_time: Any) -> str | None:
+        """Path of the job's folder copy, checked on disk."""
+        recorded = self.saved.get(str(_start_id(start_time)))
+        return await self.hass.async_add_executor_job(find_saved, self.folder, recorded, start_time)
 
     async def async_save_now(self, start_time: Any) -> str:
         """Copy one job's timelapse now (card button). Raises LookupError if not listed."""

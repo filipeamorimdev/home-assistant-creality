@@ -457,6 +457,13 @@ function fmtEnergy(kwh) {
   return `${kwh.toFixed(kwh < 1 ? 3 : 2)} kWh`;
 }
 
+/** Load failure note; ``source: "folder"`` results come from the saved copy. */
+function loadErrorText(result) {
+  return result?.source === "folder"
+    ? "Couldn't load the saved timelapse. Try again."
+    : "Couldn't load the timelapse from the printer. Try again.";
+}
+
 /**
  * Whole video as a blob URL, so the player can seek freely (the printer
  * ignores Range requests). ``onProgress`` gets 0..1 when the size is known.
@@ -2751,12 +2758,10 @@ class CrealityCard extends HTMLElement {
           ? `Loading… ${Math.round(state.progress * 100)}%`
           : "Loading…";
       } else if (state.loadError) {
-        text = "Couldn't load the timelapse from the printer. Try again.";
+        text = loadErrorText(result);
       }
     } else if (state?.status === "missing") {
-      text = savedAs
-        ? `${savedAs} (no longer on the printer)`
-        : "The printer has no timelapse for this print (timelapse off, or the print was very short).";
+      text = "The printer has no timelapse for this print (timelapse off, or the print was very short).";
     } else if (state?.status === "unavailable") {
       text = "Couldn't reach the printer to look for the timelapse.";
     } else if (state?.status === "error") {
@@ -3265,8 +3270,9 @@ class CrealityCard extends HTMLElement {
     if (this._timelapse !== state) return null; // Job changed or card detached meanwhile.
     state.status = ["ready", "missing", "unavailable"].includes(res?.status) ? res.status : "error";
     state.result = state.status === "ready" ? res : null;
-    // Folder copy made by auto-save (or the save dialog), kept across later lookups.
-    if (res?.saved_as) state.savedAs = res.saved_as;
+    // Folder copy (auto-save or the save dialog); the integration reports it
+    // only while the file exists, and then serves it instead of the printer's.
+    if (state.status !== "error") state.savedAs = res.saved_as || null;
     state.fetchedAt = Date.now();
     let wait = 0;
     if (state.status === "missing" && !res.final && Date.now() - state.since < TIMELAPSE_WAIT_MS) wait = TIMELAPSE_POLL_MS;
@@ -3504,16 +3510,14 @@ class CrealityCard extends HTMLElement {
           ? `Loading timelapse… ${Math.round(state.progress * 100)}%`
           : "Loading timelapse…";
       } else if (state.loadError) {
-        note = "Couldn't load the timelapse from the printer. Try again.";
+        note = loadErrorText(state.result);
       }
     } else if (state?.waiting) {
       label = "Waiting for timelapse…";
       note = "Waiting for the printer to save the timelapse…";
     } else if (state?.status === "missing") {
       label = "No timelapse";
-      note = savedAs
-        ? `${savedAs} (no longer on the printer)`
-        : "The printer has no timelapse for this print (timelapse off, or the print was very short).";
+      note = "The printer has no timelapse for this print (timelapse off, or the print was very short).";
     } else if (state?.status === "unavailable") {
       label = "Timelapse unavailable";
       note = "Couldn't reach the printer to look for the timelapse. Retrying…";
