@@ -422,7 +422,3 @@ An unchanged scrape leaves the file untouched.
 - Energy downtime is not reconstructed; gaps mark totals partial.
 - Saved history plays timelapses from the timelapse folder or the printer; a video in neither (deleted, folder changed, never saved) is gone. Auto-save copies only jobs that end while it is enabled.
 - Creality Cloud and CFS-specific features are out of scope.
-
-## Protocol notes
-
-See [creality-ws-notes.md](creality-ws-notes.md).

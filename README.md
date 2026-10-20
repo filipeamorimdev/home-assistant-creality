@@ -4,6 +4,8 @@
 
 Home Assistant integration for Creality LAN printers (Ender 3 V3 KE / K1-class firmware). It talks to the printer directly over your network on WebSocket port **9999**: no Creality Cloud, no account, no extra add-on.
 
+![Creality card in action](docs/images/creality-card.gif)
+
 ![Creality card during a print](docs/images/card.png)
 
 ## Highlights
@@ -60,8 +62,20 @@ actions:
 
 - [Setup and reference guide](docs/guide.md): entities, options, card layout, camera modes, timelapse saving, energy measurement, time estimates and limitations
 - [CHANGELOG.md](CHANGELOG.md): changes and upgrade notes
-- [Protocol notes](docs/creality-ws-notes.md)
+
+## How this differs from similar projects
+
+Several Home Assistant integrations exist for Creality printers. This project offers:
+
+- **MIT license** instead of AGPL (like [ha_creality_ws](https://github.com/3dg1luk43/ha_creality_ws)), making it easier to incorporate into other projects
+- **Advanced energy tracking**: per-print energy measurement with room-baseline subtraction for whole-room power meters, saved to print history with material and electricity costs
+- **G-code silhouette**: 2D front/side view of the actual object being printed, filled up to the current layer, built from the job's real G-code
+- **Comprehensive print history**: saves completed prints with costs, thumbnails, and timelapse access
+- **Automatic timelapse saving**: optional auto-save every finished print's timelapse to a folder or NAS share
+- **More mature than early-stage alternatives**: [creality-print-viewer](https://github.com/Shidogn/creality-print-viewer) is in early development with basic monitoring features
+
+All three integrations provide local WebSocket control, camera streaming, and bundled dashboard cards. Choose based on your needs: MIT licensing flexibility, advanced cost tracking and history features, or HACS default availability (ha_creality_ws).
 
 ## License
 
-MIT, clean-room implementation. Do not copy AGPL sources from other Creality HA projects.
+MIT license.
