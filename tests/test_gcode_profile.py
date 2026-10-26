@@ -94,6 +94,52 @@ G1 X10 Y10 E0.5
         self.assertEqual(spans(result, "x", 0), [[0.0, 10.5]])
         self.assertEqual(spans(result, "y", 1), [[0.0, 10.5]])
 
+    def test_interleaved_support_layers_fill_their_height(self):
+        # Independent support layer height: support layers sit between object
+        # layers, so each layer is thicker than the gap to the one below it.
+        text = """M83
+;LAYER_CHANGE
+;Z:0.2
+;HEIGHT:0.2
+;TYPE:Outer wall
+G1 X0 Y0
+G1 X10 Y0 E1
+;LAYER_CHANGE
+;Z:0.4
+;HEIGHT:0.2
+G1 X0 Y0
+G1 X10 Y0 E1
+;LAYER_CHANGE
+;Z:0.45
+;HEIGHT:0.05
+;TYPE:Support
+;HEIGHT:0.2
+G1 X20 Y0
+G1 X25 Y0 E1
+;LAYER_CHANGE
+;Z:0.6
+;HEIGHT:0.15
+;TYPE:Outer wall
+;HEIGHT:0.2
+G1 X0 Y0
+G1 X10 Y0 E1
+;LAYER_CHANGE
+;Z:0.65
+;HEIGHT:0.05
+;TYPE:Support
+;HEIGHT:0.2
+G1 X20 Y0
+G1 X25 Y0 E1
+"""
+        result = profile(text)
+        self.assertEqual(result["z"], [0.2, 0.4, 0.45, 0.6, 0.65])
+        both = [[0.0, 10.5], [20.0, 25.5]]
+        self.assertEqual(spans(result, "x", 0), [[0.0, 10.5]])
+        # 0.2-0.4, 0.4-0.45 and 0.45-0.6 each hold object and support.
+        for layer in (1, 2, 3):
+            self.assertEqual(spans(result, "x", layer), both)
+        self.assertEqual(spans(result, "x", 4), [[20.0, 25.5]])
+
     def test_without_markers_groups_by_extruding_z(self):
         text = "M83\nG1 Z0.2\nG1 X0 Y0\nG1 X5 Y0 E1\nG1 Z0.6 ; hop\nG1 X0 Y0\nG1 Z0.4\nG1 X5 Y5 E1\n"
         result = profile(text)

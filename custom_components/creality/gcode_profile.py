@@ -7,6 +7,7 @@ shows real holes and overhangs, at a fixed horizontal resolution.
 
 from __future__ import annotations
 
+import bisect
 import math
 from typing import Any
 
@@ -17,6 +18,8 @@ _BIN_OFFSET = 200
 _BIN_COUNT = 2000
 # Fallback layer grouping when the slicer wrote no layer markers.
 _Z_BUCKET_MM = 0.01
+# A layer must reach this far into the drawing row below it to count there.
+_Z_OVERLAP_MM = 0.001
 
 
 def _bin(value: float) -> int:
@@ -83,7 +86,8 @@ class GcodeProfiler:
         self.abs_xy = True
         self.abs_e = True
         self.skip = False  # Skirt and custom start/end G-code.
-        # Marker-based layers: [z, xmask, ymask, z_from_comment]
+        self.height = 0.0  # Latest ;HEIGHT: (Orca-style extrusion height).
+        # Marker-based layers: [z, xmask, ymask, z_from_comment, height]
         self.layers: list[list[Any]] = []
         self._pending_z: float | None = None
         # Fallback, used only when the file has no layer markers.
@@ -98,11 +102,16 @@ class GcodeProfiler:
 
     def _comment(self, text: str) -> None:
         if text.startswith(("LAYER_CHANGE", "LAYER:")):
-            self.layers.append([None, 0, 0, False])
+            self.layers.append([None, 0, 0, False, 0.0])
         elif text.startswith("Z:") and self.layers:
             try:
                 self.layers[-1][0] = float(text[2:])
                 self.layers[-1][3] = True
+            except ValueError:
+                pass
+        elif text.startswith("HEIGHT:"):
+            try:
+                self.height = float(text[7:])
             except ValueError:
                 pass
         elif text.startswith("TYPE:"):
@@ -180,6 +189,7 @@ class GcodeProfiler:
             layer = self.layers[-1]
             layer[1] |= xm
             layer[2] |= ym
+            layer[4] = max(layer[4], self.height)
             if not layer[3]:
                 # Cura-style markers carry no Z: use the highest extruding Z.
                 layer[0] = self.z if layer[0] is None else max(layer[0], self.z)
@@ -196,17 +206,26 @@ class GcodeProfiler:
             self._tail = b""
         if any(layer[1] for layer in self.layers):
             # Drop empty markers (e.g. a trailing marker in end G-code).
-            rows = [(layer[0] or 0.0, layer[1], layer[2]) for layer in self.layers if layer[1]]
+            rows = [(layer[0] or 0.0, layer[1], layer[2], layer[4]) for layer in self.layers if layer[1]]
         else:
-            rows = [(z, m[0], m[1]) for z, m in sorted(self.z_layers.items()) if m[0]]
+            rows = [(z, m[0], m[1], 0.0) for z, m in sorted(self.z_layers.items()) if m[0]]
         if not rows:
             return None
         zs: list[float] = []
-        for z, _, _ in rows:
+        for z, _, _, _ in rows:
             # Z must be non-decreasing for drawing; markers without Z inherit.
             zs.append(round(max(z, zs[-1] if zs else 0.0), 3))
+        # Row i is drawn from zs[i - 1] to zs[i]. With independent support
+        # layer height, support and object layers interleave (Z 0.4, 0.45,
+        # 0.6, ...) and each is thicker than the gap below it; add every layer
+        # to all rows its height covers, or both come out as thin stripes.
+        masks = [[xm, ym] for _, xm, ym, _ in rows]
+        for j, (_, xm, ym, height) in enumerate(rows):
+            for row in masks[bisect.bisect_right(zs, zs[j] - height + _Z_OVERLAP_MM, 0, j) : j]:
+                row[0] |= xm
+                row[1] |= ym
         xmask = ymask = 0
-        for _, xm, ym in rows:
+        for xm, ym in masks:
             xmask |= xm
             ymask |= ym
         x_lo = (xmask & -xmask).bit_length() - 1
@@ -217,13 +236,13 @@ class GcodeProfiler:
             return {
                 "min": round((lo - _BIN_OFFSET) * BIN_MM, 1),
                 "size": round((hi - lo) * BIN_MM, 1),
-                "bands": [[a, b, _spans(m, lo)] for a, b, m in _merge_bands([r[index] for r in rows])],
+                "bands": [[a, b, _spans(m, lo)] for a, b, m in _merge_bands([r[index] for r in masks])],
             }
 
         return {
             "version": PROFILE_VERSION,
             "layers": len(rows),
             "z": zs,
-            "x": axis(1, x_lo, x_hi),
-            "y": axis(2, y_lo, y_hi),
+            "x": axis(0, x_lo, x_hi),
+            "y": axis(1, y_lo, y_hi),
         }
