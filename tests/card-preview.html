@@ -1,12 +1,13 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Creality card — completion layout fixture</title>
+<title>Creality cards — layout fixture</title>
 <style>
   body { background: #111; color: #eee; font-family: system-ui; margin: 24px auto; max-width: 1000px; }
   nav { display: flex; gap: 8px; margin-bottom: 16px; }
   button { padding: 10px; cursor: pointer; }
-  creality-card { display: block; }
+  creality-card, creality-compact-card { display: block; }
+  .compact { max-width: 480px; margin-bottom: 16px; }
   @media(max-width: 600px) { body { margin: 12px; } }
 </style>
 <nav><button id="success">Completed</button><button id="stopped">Stopped</button><button id="next">New print</button><button id="half">Layer 365</button><button id="pause">Pause</button><button id="warning">Storage warning</button><button id="runout">Filament runout</button><button id="idle">Idle</button></nav>
@@ -14,13 +15,17 @@
   customElements.define("home-assistant", class extends HTMLElement {});
   // Stand-in for HA's icon element so buttons are visible here.
   const GLYPHS = { "mdi:pause": "❚❚", "mdi:play": "▶", "mdi:stop": "■", "mdi:arrow-expand": "⤢", "mdi:camera": "◉",
-    "mdi:fullscreen": "⛶", "mdi:close": "✕", "mdi:home": "⌂", "mdi:chevron-down": "▾", "mdi:alert": "!", "mdi:alert-octagon": "!" };
+    "mdi:fullscreen": "⛶", "mdi:close": "✕", "mdi:home": "⌂", "mdi:chevron-down": "▾", "mdi:alert": "!", "mdi:alert-octagon": "!",
+    "mdi:layers-triple": "≡", "mdi:flag-checkered": "⚑", "mdi:timer-outline": "◷", "mdi:flash": "ϟ",
+    "mdi:printer-3d-nozzle-heat": "▼", "mdi:radiator": "▤", "mdi:printer-3d-nozzle-alert": "!",
+    "mdi:printer-3d-nozzle": "↻", "mdi:delete-outline": "🗑", "mdi:filmstrip-box-multiple": "▦" };
   customElements.define("ha-icon", class extends HTMLElement {
     static observedAttributes = ["icon"];
     attributeChangedCallback() { this.textContent = GLYPHS[this.getAttribute("icon")] || ""; }
   });
   await import("../custom_components/creality/frontend/creality-card.js");
   const card = document.createElement("creality-card");
+  const compact = document.createElement("creality-compact-card");
   const FILE = "/usr/data/printer_data/gcodes/Shiny A_PETG_2h57m.gcode";
   // Synthetic G-code silhouette: an arch from the front, a ramp from the side.
   const z = Array.from({ length: 730 }, (_, i) => +(0.2 + i * 0.1).toFixed(2));
@@ -39,7 +44,18 @@
     "sensor.status": [{ s: "offline", lu: t - 9000 }, { s: "idle", lu: t - 3600 }],
     "sensor.room_power": [{ s: "85", lu: t - 10000 }, { s: "312", lu: t - 3000 }],
   };
-  const callWS = async (msg) => msg.type === "creality/print_profile"
+  // Two saved prints: one with a G-code copy in the folder, one only still on the printer.
+  const printLog = { version: 1, prefs: { currency: "€", costPerKg: 20, lastCostByType: { PETG: 24 } }, prints: [
+    { id: "p1", jobKey: "sensor.status|1791818714||v6 keyb_PLA_2h40m.gcode", startTime: 1791818714, ended: "2026-10-05T21:31:00Z",
+      file: "v6 keyb_PLA_2h40m.gcode", result: "completed", timeSeconds: 10848, used: 31653, usedUnit: "mm", filamentType: "PLA",
+      energyKwh: 0.566, energyQuality: "complete", estimatedCost: 1.5, currency: "€" },
+    { id: "p2", jobKey: "sensor.status|1791700000||clip_PETG_20m.gcode", startTime: 1791700000, ended: "2026-10-04T10:00:00Z",
+      file: "clip_PETG_20m.gcode", result: "stopped", timeSeconds: 600, filamentType: "PETG", currency: "€" },
+  ] };
+  const extraWS = { "frontend/get_user_data": () => ({ value: printLog }),
+    "creality/gcode_files": () => ({ saved: [1791818714], printer: ["clip_PETG_20m.gcode"] }),
+    "creality/print_again": () => ({ file: "/usr/data/printer_data/gcodes/x.gcode", uploaded: false }) };
+  const callWS = async (msg) => extraWS[msg.type] ? extraWS[msg.type](msg) : msg.type === "creality/print_profile"
     ? { status: "ready", file: FILE, profile } : msg.type === "creality/timelapse" ? timelapse()
     : msg.type === "history/history_during_period" ? { [msg.entity_ids[0]]: history[msg.entity_ids[0]] || [] } : {};
   const states = {
@@ -74,15 +90,26 @@
     nozzle_target: "number.nozzle_target", bed: "sensor.bed", bed_target: "number.bed_target", time_left: "sensor.left",
     pause: "button.pause", resume: "button.resume", stop: "button.stop", home: "button.home",
     print_tuning: "number.speed", model_fan: "fan.model", position_z: "sensor.z", filament: "sensor.filament" });
+  compact.setConfig({ type: "custom:creality-compact-card", title: "Workshop printer", status: "sensor.status",
+    camera: "camera.printer", preview: "image.preview", progress: "sensor.progress", object: "sensor.file",
+    layer: "sensor.layer", total_layers: "sensor.layers", job_time: "sensor.duration", time_left: "sensor.left",
+    filament: "sensor.filament", print_energy: "sensor.room_power", pause: "button.pause", resume: "button.resume",
+    stop: "button.stop" });
   // No camera proxy here: serve a still in place of the MJPEG stream.
-  const picture = card._picture.bind(card);
-  card._picture = (id, stream) => id.startsWith("camera.") ? "/tests/camera-still.svg" : picture(id, stream);
+  for (const c of [card, compact]) {
+    const picture = c._picture.bind(c);
+    c._picture = (id, stream) => id.startsWith("camera.") ? "/tests/camera-still.svg" : picture(id, stream);
+  }
   const hass = { states, callWS, callService: async (domain, service, data) => {
     // Echo number targets back like the integration would.
-    if (domain === "number" && service === "set_value") { put(data.entity_id, String(data.value)); card.hass = { ...hass }; }
+    if (domain === "number" && service === "set_value") { put(data.entity_id, String(data.value)); refresh(); }
   } };
-  card.hass = hass;
-  document.body.append(card);
+  const refresh = () => { for (const c of [card, compact]) c.hass = { ...hass }; };
+  refresh();
+  const slot = document.createElement("div");
+  slot.className = "compact";
+  slot.append(compact);
+  document.body.append(slot, card);
   // Like HA, replace state objects instead of mutating them: the card only
   // re-renders when a configured entity's state object changes.
   function put(id, state, attributes) {
@@ -91,9 +118,9 @@
   function show(status, raw) {
     // Restart a synthetic job so the fixture can switch terminal outcomes.
     put("sensor.status", "printing", { state_raw: 1, print_start_time: Date.now(), file: FILE });
-    card.hass = { ...hass };
+    refresh();
     put("sensor.status", status, { ...states["sensor.status"].attributes, state_raw: raw });
-    card.hass = { ...hass };
+    refresh();
   }
   document.getElementById("success").onclick = () => { put("sensor.layer", "730"); show("completed", 2); };
   document.getElementById("stopped").onclick = () => show("stopped", 4);
@@ -108,20 +135,28 @@
           err_message: "Current storage space usage has reached %s, please clean up in time",
           err_solution: "Delete files: Delete G-code files or time-lapse camera files that are no longer needed." }
       : { ...attrs, err_key: 0, err_severity: "ok", err_message: "", err_solution: "", err_value: "" });
-    card.hass = { ...hass };
+    refresh();
   };
   document.getElementById("runout").onclick = () => {
     const on = states["sensor.filament"].state !== "runout";
     put("sensor.filament", on ? "runout" : "normal");
     if (on) put("number.nozzle_target", "0");
-    card.hass = { ...hass };
+    refresh();
   };
   document.getElementById("idle").onclick = () => {
     put("sensor.status", "idle", { state_raw: 0 });
     put("sensor.progress", "0");
     put("sensor.material", "0");
-    card.hass = { ...hass };
+    refresh();
   };
   put("sensor.layer", "365");
   show("printing", 1);
+  // ?state=<button id> opens the fixture in that state, ?width=<px> narrows the
+  // compact card (headless browsers keep a minimum window width).
+  const params = new URLSearchParams(location.search);
+  if (params.get("width")) slot.style.maxWidth = `${params.get("width")}px`;
+  document.getElementById(params.get("state"))?.click();
+  // ?open=save|details opens the print dialog.
+  const open = params.get("open");
+  setTimeout(() => open === "save" ? card._openPrintModal() : open === "details" && card._showPrintDetails("p1"), 300);
 </script>

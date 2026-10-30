@@ -16,8 +16,6 @@ from homeassistant.const import PERCENTAGE, UnitOfSpeed, UnitOfTemperature, Unit
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoredExtraData, RestoreEntity
-from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import CrealityCoordinator
@@ -38,7 +36,6 @@ async def async_setup_entry(
             TotalLayersSensor(coord),
             JobTimeSensor(coord),
             TimeLeftSensor(coord),
-            OurEtaSensor(coord),
             UsedMaterialSensor(coord),
             FilamentStatusSensor(coord),
             NozzleTempSensor(coord),
@@ -203,50 +200,6 @@ class TimeLeftSensor(_CSensor):
             return int(float(self._d().get("printLeftTime")))
         except (TypeError, ValueError):
             return None
-
-
-class OurEtaSensor(_CSensor, RestoreEntity):
-    """Whole-job duration estimated when the print started, with its finish time.
-
-    Fixed for the job; the latched estimate is restored after an HA restart.
-    """
-
-    _attr_translation_key = "print_time_left_estimated"
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:timer-check"
-
-    def __init__(self, coordinator: CrealityCoordinator) -> None:
-        super().__init__(coordinator, "print_time_left_estimated")
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        last = await self.async_get_last_extra_data()
-        if last is not None:
-            self.coordinator.restore_plan(last.as_dict().get("plan"))
-
-    @property
-    def extra_restore_state_data(self) -> RestoredExtraData:
-        return RestoredExtraData({"plan": self.coordinator.plan})
-
-    @property
-    def available(self) -> bool:
-        # Opt-in through the "Own time estimate" switch.
-        return self.coordinator.own_estimate and super().available
-
-    @property
-    def native_value(self) -> int | None:
-        v = self._d().get("__eta_ours")
-        return int(v) if isinstance(v, int) else None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        finish = self._d().get("__eta_ours_finish")
-        return {
-            "expected_finish": dt_util.utc_from_timestamp(finish).isoformat()
-            if isinstance(finish, (int, float)) else None,
-        }
 
 
 class UsedMaterialSensor(_CSensor):
@@ -492,4 +445,9 @@ class TimelapseArchiveSensor(_CSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return self.coordinator.archive.as_attributes()
+        gcode = self.coordinator.gcode
+        return {
+            **self.coordinator.archive.as_attributes(),
+            "gcode_files": len(gcode.saved),
+            "gcode_last_error": gcode.last_error,
+        }

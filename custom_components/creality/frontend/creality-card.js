@@ -17,7 +17,6 @@ const ENTITY_ROLES = {
   total_layers: ["sensor", "total_layers"],
   job_time: ["sensor", "print_job_time"],
   time_left: ["sensor", "print_time_left"],
-  time_left_estimated: ["sensor", "print_time_left_estimated"],
   used_material: ["sensor", "used_material_length"],
   filament: ["sensor", "filament_status"],
   position_x: ["sensor", "position_x"],
@@ -118,7 +117,6 @@ const LABELS = {
   total_layers: "Total layers",
   job_time: "Print job time",
   time_left: "Time left (printer)",
-  time_left_estimated: "Estimated print time",
   used_material: "Used material length",
   filament: "Filament status",
   printer_switch: "Printer power switch",
@@ -357,6 +355,29 @@ const FILAMENT_DENSITY = {
   pc: 1.2,
   hips: 1.04,
 };
+
+// Slicer spellings of the types above (Creality Print writes e.g. "PLA-CF").
+const FILAMENT_ALIASES = { "PLA-CF": "CF-PLA", "PETG-CF": "CF-PETG", "PA": "Nylon", "SILK": "Silk PLA" };
+
+/**
+ * Filament type named in a sliced file ("part_PETG_2h9m.gcode" → "PETG"), or
+ * null. Creality Print puts the material right before the time, so the last
+ * match wins; longer names win at the same place ("CF-PLA" over "PLA").
+ */
+function filamentFromFileName(file) {
+  const name = ` ${String(file || "").replace(/^.*[\\/]/, "").replace(/\.[^.]*$/, "").replace(/[_\s.]+/g, " ")} `;
+  const names = [...FILAMENT_TYPES.map((type) => [type, type]), ...Object.entries(FILAMENT_ALIASES)];
+  let best = null;
+  for (const [spelling, type] of names) {
+    const escaped = spelling.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "[ -]?");
+    const re = new RegExp(`[ -](${escaped})(?=[ -])`, "gi");
+    for (const m of name.matchAll(re)) {
+      const at = m.index + m[0].length;
+      if (!best || at > best.at || (at === best.at && m[1].length > best.length)) best = { at, length: m[1].length, type };
+    }
+  }
+  return best?.type || null;
+}
 
 function filamentDensity(type) {
   const key = String(type || "").trim().toLowerCase();
@@ -618,12 +639,44 @@ function historyStates(raw, entityId) {
     .sort((a, b) => a.t - b.t);
 }
 
-/** Time of the last off→on transition, where `isOff` tells an off state. */
-function lastPowerOn(states, isOff) {
-  for (let i = states.length - 1; i > 0; i--) {
-    if (!isOff(states[i].s) && isOff(states[i - 1].s)) return states[i].t;
+/**
+ * Off stretches shorter than this are not a power cycle: a Home Assistant
+ * restart or Wi-Fi drop also shows the printer `offline`, and a meter may not
+ * have reported the drop yet after a quick plug toggle.
+ */
+const POWER_OFF_MIN_MS = 5 * 60000;
+/** Preparation before the printer's job start time still counts towards the job. */
+const JOB_PREP_MAX_MS = 30 * 60000;
+
+/**
+ * Last power-on after at least `minOffMs` off, as {off, on} (when that off
+ * stretch began and ended), or null. `isOff` tells an off state; unavailable /
+ * unknown states (HA starting, device unreachable) neither start nor end one.
+ */
+function lastPowerOn(states, isOff, minOffMs = POWER_OFF_MIN_MS) {
+  let offSince = null;
+  let found = null;
+  for (const { t, s } of states) {
+    if (isMissingState(s)) continue;
+    if (isOff(s)) {
+      offSince ??= t;
+    } else {
+      if (offSince != null && t - offSince >= minOffMs) found = { off: offSince, on: t };
+      offSince = null;
+    }
   }
-  return null;
+  return found;
+}
+
+/**
+ * Start of the active stretch (processing, printing, paused…) of the print
+ * status that is in effect at `atMs`, or null when the status is not active then.
+ */
+function activeSince(states, atMs) {
+  let i = states.findLastIndex((p) => p.t <= atMs);
+  if (i < 0 || !ACTIVE_STATUSES.includes(states[i].s.toLowerCase())) return null;
+  while (i > 0 && ACTIVE_STATUSES.includes(states[i - 1].s.toLowerCase())) i--;
+  return states[i].t;
 }
 
 function newPrintId() {
@@ -712,7 +765,7 @@ class CrealityCard extends HTMLElement {
           type: "expandable",
           flatten: true,
           title: "Printing information",
-          schema: ["status", "progress", "preview", "object", "layer", "total_layers", "job_time", "time_left", "time_left_estimated", "used_material", "filament"].map(
+          schema: ["status", "progress", "preview", "object", "layer", "total_layers", "job_time", "time_left", "used_material", "filament"].map(
             (name) => ({
               name,
               selector: { entity: { domain: name === "preview" ? "image" : "sensor" } },
@@ -1004,34 +1057,19 @@ class CrealityCard extends HTMLElement {
     }
   }
 
-  /** Real / Creality / Ours time boxes; "Ours" only while the integration estimate is enabled. */
+  /** Real / Creality time boxes and the finish clock next to the percentage. */
   _syncTimings(status) {
     const stLower = String(status).toLowerCase();
     const jobActive = ACTIVE_STATUSES.includes(stLower);
     const jobDone = stLower === "completed";
     const elapsedSec = parseDurationSeconds(this._val("job_time"));
     const crealityLeftSec = parseDurationSeconds(this._val("time_left"));
-    // Whole-job estimate the integration fixed when the print started, and its
-    // finish time; not updated during the print. Opt-in: the sensor is
-    // unavailable while the "Own time estimate" switch is off.
-    const oursSt = this._st("time_left_estimated");
-    const oursShown = Boolean(oursSt) && oursSt.state !== "unavailable";
-    const ourTotalSec = oursShown ? parseDurationSeconds(oursSt.state) : null;
-    const ourFinish = oursShown && oursSt.attributes?.expected_finish
-      ? new Date(oursSt.attributes.expected_finish) : null;
 
     const realLabel = fmtDuration(elapsedSec ?? this._val("job_time"));
     let crealityLabel = "—";
-    let oursLabel = "—";
     if (jobDone) crealityLabel = "0s";
     else if (jobActive) {
       crealityLabel = crealityLeftSec != null ? fmtDuration(crealityLeftSec) : fmtDuration(this._val("time_left"));
-    }
-    if ((jobActive || jobDone) && ourTotalSec != null) {
-      oursLabel = fmtDuration(ourTotalSec);
-      if (ourFinish && !Number.isNaN(ourFinish.getTime())) {
-        oursLabel += ` · ETA ${fmtClock(ourFinish, this._hass?.locale)}`;
-      }
     }
     // Finish clock time from the printer's live remaining time.
     const leftSec = jobActive ? crealityLeftSec : null;
@@ -1044,9 +1082,6 @@ class CrealityCard extends HTMLElement {
     this._setText("progress-eta", etaText);
     this._setText("time-real", realLabel);
     this._setText("time-creality", crealityLabel);
-    this._setText("time-ours", oursLabel);
-    const oursEl = this._root.getElementById("timing-ours");
-    if (oursEl) oursEl.hidden = !oursShown;
   }
 
   /**
@@ -1111,6 +1146,10 @@ class CrealityCard extends HTMLElement {
   _confirmPress(entityId, message) {
     if (!entityId) return;
     if (confirm(message)) this._press(entityId);
+  }
+
+  _notify(message) {
+    this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
   }
 
   /** Show a failed action as an HA toast instead of an unhandled rejection. */
@@ -1490,7 +1529,6 @@ class CrealityCard extends HTMLElement {
             overflow: hidden;
             text-overflow: ellipsis;
           }
-          .timing b.eta { color: var(--cp-accent); }
           .coords {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -1827,32 +1865,41 @@ class CrealityCard extends HTMLElement {
             margin-top: 6px;
           }
           .filament-custom[hidden] { display: none !important; }
-          .log-del {
+          .log-acts { display: flex; align-items: center; gap: 4px; }
+          .log-act {
             border: 0;
             background: transparent;
             color: var(--cp-muted);
             cursor: pointer;
-            padding: 2px;
+            padding: 4px;
             border-radius: 6px;
+            display: inline-flex;
           }
+          .log-act:hover { color: var(--cp-accent); background: #ffffff10; }
+          .log-act[disabled] { opacity: 0.35; cursor: default; background: none; color: var(--cp-muted); }
           .log-del:hover { color: #e5484d; }
-          .log-del ha-icon { --mdc-icon-size: 16px; }
+          .log-act ha-icon { --mdc-icon-size: 18px; }
           .log-empty { font-size: 12px; color: var(--cp-muted); }
           .log-note {
             font-size: 11px;
             color: #c9a227;
             margin-top: 8px;
           }
-          /* Save/edit print form: an in-flow panel so the card grows to fit it. */
-          .log-editor { display: none; }
-          .log-editor.open { display: block; }
-          .modal {
-            background: var(--cp-panel);
-            border: 1px solid var(--cp-accent);
-            border-radius: 12px;
-            padding: 14px;
-            scroll-margin: 12px;
+          /* Save / edit / details of a print: a dialog filling the screen. */
+          .log-dialog {
+            width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none;
+            margin: 0; padding: 0; border: 0; border-radius: 0;
+            background: var(--cp-bg); color: var(--cp-text);
           }
+          .log-dialog[open] { display: flex; flex-direction: column; }
+          .log-dialog::backdrop { background: #000c; }
+          .log-dialog-h {
+            flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--cp-border);
+          }
+          .log-dialog-h h3 { margin: 0; font-size: 16px; }
+          .log-dialog-b { flex: 1 1 auto; overflow: auto; padding: 16px; }
+          .log-dialog-b > div { max-width: 760px; margin: 0 auto; }
           #log-view[hidden], #log-edit[hidden] { display: none; }
           .log-detail {
             display: grid;
@@ -1884,10 +1931,6 @@ class CrealityCard extends HTMLElement {
             color: var(--cp-text);
             overflow-wrap: anywhere;
             white-space: pre-wrap;
-          }
-          .modal h3 {
-            margin: 0 0 12px;
-            font-size: 15px;
           }
           .form {
             display: grid;
@@ -2024,10 +2067,9 @@ class CrealityCard extends HTMLElement {
                     <div class="kv" id="layer-row">Layer: <b id="layer">—</b></div>
                   </div>
                   <div class="bar" id="bar-row"><span id="bar"></span></div>
-                  <div class="timing-row" id="timings" title="Real = print job time. Creality = printer time left. Ours = whole-job estimate and finish time fixed when the print started (slicer hint, else printer estimate), shown when the Own time estimate switch is on.">
+                  <div class="timing-row" id="timings" title="Real = print job time. Creality = printer time left.">
                     <div class="timing" id="timing-real" title="Elapsed printing time reported by the printer"><span>Real</span><b id="time-real">—</b></div>
                     <div class="timing" id="timing-creality" title="Time remaining estimated by the printer"><span>Creality</span><b id="time-creality">—</b></div>
-                    <div class="timing" id="timing-ours" title="Print time estimated when the job started (filename duration hint, else printer estimate) and the finish time it predicts; not updated during the print"><span>Ours</span><b id="time-ours" class="eta">—</b></div>
                   </div>
                   <div class="times" id="times" data-more="used_material">—</div>
                   <div class="times" id="filament"></div>
@@ -2133,9 +2175,14 @@ class CrealityCard extends HTMLElement {
               </div>
             </div>
           </section>
-        <section class="log-editor" id="log-modal">
-          <div class="modal" role="region" aria-labelledby="log-modal-title">
+        <dialog class="log-dialog" id="log-modal" aria-labelledby="log-modal-title">
+          <div class="log-dialog-h">
             <h3 id="log-modal-title">Save print</h3>
+            <button class="icon-btn" id="log-modal-close" type="button" title="Close" aria-label="Close">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <div class="log-dialog-b">
             <div id="log-view" hidden>
               <dl class="log-detail" id="log-detail"></dl>
               <div class="log-tl" id="log-tl" hidden>
@@ -2228,7 +2275,7 @@ class CrealityCard extends HTMLElement {
             </div>
             </div>
           </div>
-        </section>
+        </dialog>
         </div>
         <dialog class="camera-zoom" id="camera-zoom" aria-labelledby="camera-zoom-title">
           <div class="camera-zoom-h">
@@ -2266,7 +2313,7 @@ class CrealityCard extends HTMLElement {
           </div>
         </dialog>
         <dialog class="tl-dialog" id="tl-settings" aria-labelledby="tl-settings-title">
-          <h3 id="tl-settings-title">Timelapse saving</h3>
+          <h3 id="tl-settings-title">Timelapse and G-code saving</h3>
           <div class="form">
             <label class="wide">Folder or network share
               <input id="tl-folder" type="text" placeholder="/media/nas/timelapses" autocomplete="off" />
@@ -2303,14 +2350,6 @@ class CrealityCard extends HTMLElement {
     const on = (id, event, fn) => {
       this._root.getElementById(id)?.addEventListener(event, fn);
     };
-    // The shadow root outlives re-renders: bind root-level listeners only once.
-    if (!this._rootListeners) {
-      this._rootListeners = true;
-      this._root.addEventListener("keydown", (ev) => {
-        if (ev.key === "Escape" && this._isPrintModalOpen()) this._closePrintModal();
-      });
-    }
-
     on("printer-power", "click", () => this._togglePrinterPower());
     on("home", "click", () => this._confirmPress(this._cfg.home, "Home XY then Z?"));
     on("pause", "click", () => this._confirmPress(this._cfg.pause, "Pause the current print?"));
@@ -2345,6 +2384,9 @@ class CrealityCard extends HTMLElement {
       else this._closePrintModal();
     });
     on("log-close", "click", () => this._closePrintModal());
+    on("log-modal-close", "click", () => this._closePrintModal());
+    // Close button, Save or Escape: the dialog's close event resets the panel.
+    on("log-modal", "close", () => this._printModalClosed());
     on("log-edit", "click", () => this._editPrintFromDetails());
     on("log-save", "click", () => this._savePrintFromModal());
     on("log-energy", "input", () => {
@@ -2353,6 +2395,12 @@ class CrealityCard extends HTMLElement {
       this._setText("log-energy-quality", "Energy measurement: manual");
     });
     this._root.getElementById("log-list")?.addEventListener("click", (ev) => {
+      const repeat = ev.target.closest("[data-repeat]");
+      if (repeat) {
+        ev.stopPropagation();
+        this._printAgain(repeat.dataset.repeat);
+        return;
+      }
       const del = ev.target.closest("[data-del]");
       if (del) {
         ev.preventDefault();
@@ -2589,6 +2637,7 @@ class CrealityCard extends HTMLElement {
     this._deletedIds = store.deleted || [];
     this._renderPrintLog();
     this._syncSaveButton();
+    this._loadGcodeFiles();
     // Upload prints only this browser had (e.g. saved while the server copy was not read).
     if (localOnly) await this._persistPrints();
   }
@@ -2626,7 +2675,12 @@ class CrealityCard extends HTMLElement {
   }
 
   _isPrintModalOpen() {
-    return this._root.getElementById("log-modal")?.classList.contains("open");
+    return !!this._root.getElementById("log-modal")?.open;
+  }
+
+  _showPrintModal() {
+    const dialog = this._root.getElementById("log-modal");
+    if (dialog && !dialog.open) dialog.showModal?.();
   }
 
   _setPrintPanelMode(mode) {
@@ -2645,9 +2699,7 @@ class CrealityCard extends HTMLElement {
     if (detail) detail.innerHTML = printDetailsHtml(p);
     this._loadDetailTimelapse(p);
     this._setPrintPanelMode("view");
-    const panel = this._root.getElementById("log-modal");
-    panel?.classList.add("open");
-    panel?.querySelector(".modal")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    this._showPrintModal();
     this._root.getElementById("log-edit")?.focus({ preventScroll: true });
   }
 
@@ -2807,6 +2859,12 @@ class CrealityCard extends HTMLElement {
     const title = this._root.getElementById("log-modal-title");
     if (title) title.textContent = existing ? "Edit print" : "Save print";
     const draft = existing ? { ...existing } : this._snapshotPrintDraft();
+    // A new save starts from the filament named in the file; edits keep the saved choice.
+    const named = existing ? null : filamentFromFileName(draft.file);
+    if (named) {
+      draft.filamentType = named;
+      draft.costPerKg = this._printPrefs.lastCostByType?.[named] ?? this._printPrefs.costPerKg ?? "";
+    }
     if (!existing && !draft.preview) {
       draft.preview = (await this._capturePreviewThumb()) || this._lastJobDraft?.preview || "";
     }
@@ -2819,15 +2877,18 @@ class CrealityCard extends HTMLElement {
     this._writePrintForm(draft);
     this._refreshPrintEstimate();
     this._setPrintPanelMode("edit");
-    const panel = this._root.getElementById("log-modal");
-    panel?.classList.add("open");
-    panel?.querySelector(".modal")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+    this._showPrintModal();
     this._root.getElementById("log-file")?.focus({ preventScroll: true });
   }
 
   _closePrintModal() {
+    const dialog = this._root.getElementById("log-modal");
+    if (dialog?.open) dialog.close();
+    else this._printModalClosed();
+  }
+
+  _printModalClosed() {
     this._resetDetailTimelapse();
-    this._root.getElementById("log-modal")?.classList.remove("open");
     this._editingId = null;
     this._formPreview = "";
   }
@@ -3122,8 +3183,10 @@ class CrealityCard extends HTMLElement {
   /**
    * Power offset: meter load before the printer was switched on (W), for a whole-room power
    * meter. The power-on moment is the printer switch's last off→on before the
-   * job (meter read at that instant), else the print status leaving `offline`
-   * (meter read 2 minutes earlier, before the printer booted). Looks back 48 h;
+   * job (meter read just before it), else the print status leaving `offline`
+   * (meter read 2 minutes earlier, before the printer booted). Only an off
+   * stretch of 5 minutes or more counts, so HA restarts, reconnects and quick
+   * plug toggles never make the printer's own draw the offset. Looks back 48 h;
    * null when no power-on is found or the meter is an energy counter. A power
    * offset the user entered on the card replaces the automatic one.
    */
@@ -3140,9 +3203,10 @@ class CrealityCard extends HTMLElement {
     let w = null;
     if (id) {
       const states = historyStates(await this._fetchHistory(id, start - 48 * 3600000, start), id);
-      const on = lastPowerOn(states, sw ? (s) => s === "off" : (s) => s.toLowerCase() === "offline");
-      if (on != null) {
-        const at = sw ? on : on - 120000;
+      const power = lastPowerOn(states, sw ? (s) => s === "off" : (s) => s.toLowerCase() === "offline");
+      if (power) {
+        // A plug may record its new reading in the same second it switches on.
+        const at = sw ? power.on - 5000 : power.on - 120000;
         const before = parseHistorySeries(await this._fetchHistory(meter.id, at, at + 1000), meter.id)
           .filter((p) => p.t <= at && Number.isFinite(p.v));
         if (before.length) w = before[before.length - 1].v * meter.kind[1];
@@ -3154,9 +3218,11 @@ class CrealityCard extends HTMLElement {
   }
 
   /**
-   * Integrate the card's meter over a job's window: printer start time (or now
-   * minus job time) until the finish recorded at completion, else now. A power
-   * meter's power offset is subtracted from every reading.
+   * Integrate the card's meter over a job's window: from when the print status
+   * became active for the job (preparation and heating, at most 30 minutes before
+   * the printer's start time), else the printer start time (or now minus job
+   * time), until the finish recorded at completion, else now. A power meter's
+   * power offset is subtracted from every reading.
    */
   async _measureMeterEnergy(job) {
     const meter = this._cardMeter();
@@ -3167,12 +3233,33 @@ class CrealityCard extends HTMLElement {
     if (!(start > 1e12 && start < end) || end - start > 7 * 86400000) return null;
     try {
       const baselineW = await this._meterBaseline(meter, job, start);
+      start = await this._jobActiveSince(job, start);
       const data = await this._fetchHistory(meter.id, start, end);
       const measured = integrateMeter(parseHistorySeries(data, meter.id), meter.kind, start, end, baselineW || 0);
       return measured && { ...measured, baselineW: meter.kind[0] === "power" ? baselineW : undefined };
     } catch (_err) {
       return null;
     }
+  }
+
+  /** Earlier start of the job from print status history (cached per job), else `start`. */
+  async _jobActiveSince(job, start) {
+    const id = this._cfg?.status;
+    if (!id) return start;
+    const cached = this._jobActiveCache;
+    if (cached?.jobKey !== job.jobKey) {
+      // The status may turn active a moment after the printer's start time.
+      const states = historyStates(await this._fetchHistory(id, start - JOB_PREP_MAX_MS, start + 60000), id);
+      const found = { jobKey: job.jobKey, t: activeSince(states, start + 60000) };
+      // Right after the start the recorder may not have written the change yet: ask again later.
+      this._jobActiveCache = Date.now() > start + 120000 ? found : null;
+      return this._earlierStart(found.t, start);
+    }
+    return this._earlierStart(cached.t, start);
+  }
+
+  _earlierStart(t, start) {
+    return t != null && t < start ? Math.max(t, start - JOB_PREP_MAX_MS) : start;
   }
 
   /** Energy of the current/last job measured from the card's meter, or null without one. */
@@ -3455,7 +3542,7 @@ class CrealityCard extends HTMLElement {
     if (save) save.disabled = !s.can_edit;
     this._drawFolderSuggestions();
     this._setText("tl-settings-note", s.can_edit
-      ? "Pick a share or type a path. Network storage added in Settings → System → Storage with usage \"Media\" appears under /media."
+      ? "Pick a share or type a path. Timelapses go to timelapses/<date>/ and each print's G-code to gcode-files/, so it can be printed again from Print history. Network storage added in Settings → System → Storage with usage \"Media\" appears under /media."
       : "Only administrators can change these settings.");
   }
 
@@ -3798,6 +3885,7 @@ class CrealityCard extends HTMLElement {
     this._closePrintModal();
     this._syncSaveButton();
     await this._persistPrints();
+    this._loadGcodeFiles();
   }
 
   async _deletePrint(id) {
@@ -3807,12 +3895,61 @@ class CrealityCard extends HTMLElement {
     await this._persistPrints();
   }
 
+  /** Jobs that can be printed again: saved G-code copies and the printer's files. */
+  async _loadGcodeFiles() {
+    if (!this._hass?.callWS || !this._cfg?.status || this._gcodeFilesBusy) return;
+    this._gcodeFilesBusy = true;
+    try {
+      const res = await this._hass.callWS({ type: "creality/gcode_files", entity_id: this._cfg.status });
+      this._gcodeFiles = { saved: new Set(res?.saved || []), printer: res?.printer ? new Set(res.printer) : null };
+    } catch (_err) {
+      this._gcodeFiles = null; // Older integration: no Print again.
+    } finally {
+      this._gcodeFilesBusy = false;
+    }
+    this._renderPrintLog();
+  }
+
+  /** A saved copy of the row's G-code exists, or the printer still has the file. */
+  _canPrintAgain(row) {
+    const files = this._gcodeFiles;
+    if (!files) return false;
+    return files.saved.has(rowStartTime(row)) || Boolean(row.file && files.printer?.has(row.file));
+  }
+
+  /** Connected and not running a job. */
+  _readyForJob() {
+    const status = String(this._val("status", "")).toLowerCase();
+    return Boolean(status) && status !== "offline" && !ACTIVE_STATUSES.includes(status);
+  }
+
+  async _printAgain(id) {
+    const row = this._prints.find((p) => p.id === id);
+    if (!row || this._printAgainBusy || !this._readyForJob()) return;
+    const name = row.file || "this print";
+    if (!confirm(`Print "${name}" again?\n\nMake sure the build plate is clear.`)) return;
+    this._printAgainBusy = true;
+    this._renderPrintLog();
+    try {
+      const res = await this._hass.callWS({
+        type: "creality/print_again", entity_id: this._cfg.status, print_start_time: rowStartTime(row), file: row.file || null,
+      });
+      this._notify(`Printing ${name} again${res?.uploaded ? " (copied from the saved G-code)" : ""}`);
+    } catch (error) {
+      this._notifyError("Couldn't print again", error);
+    } finally {
+      this._printAgainBusy = false;
+      this._renderPrintLog();
+    }
+  }
+
   _renderPrintLog() {
     const list = this._root.getElementById("log-list");
     const summary = this._root.getElementById("log-summary");
     const note = this._root.getElementById("log-store-note");
     if (!list) return;
 
+    const ready = this._readyForJob() && !this._printAgainBusy;
     if (!this._prints.length) {
       list.innerHTML = `<div class="log-empty">No saved prints yet. When a print finishes, use Save to history in the banner above.</div>`;
     } else {
@@ -3840,9 +3977,15 @@ class CrealityCard extends HTMLElement {
               <span>${esc(fmtDateShort(p.ended))} · ${esc(bits.join(" · "))}</span>
               ${p.notes ? `<span>${esc(p.notes)}</span>` : ""}
             </div>
-            <button class="log-del" type="button" title="Delete" data-del="${esc(p.id)}">
-              <ha-icon icon="mdi:delete-outline"></ha-icon>
-            </button>
+            <div class="log-acts">
+              ${this._canPrintAgain(p) ? `<button class="log-act" type="button" data-repeat="${esc(p.id)}"
+                ${ready ? 'title="Print again"' : 'title="Print again (printer busy or offline)" disabled'} aria-label="Print again">
+                <ha-icon icon="mdi:printer-3d-nozzle"></ha-icon>
+              </button>` : ""}
+              <button class="log-act log-del" type="button" title="Delete" data-del="${esc(p.id)}">
+                <ha-icon icon="mdi:delete-outline"></ha-icon>
+              </button>
+            </div>
           </div>`;
         })
         .join("");
@@ -3991,6 +4134,12 @@ class CrealityCard extends HTMLElement {
     this._applyLimits("nozzle-target", "nozzle_target");
     this._applyLimits("bed-target", "bed_target");
 
+    // A job ending adds a G-code copy; a job starting makes the printer busy.
+    if (status !== this._gcodeStatus) {
+      this._gcodeStatus = status;
+      if (this._printsLoaded) this._loadGcodeFiles();
+      else this._renderPrintLog();
+    }
     this._rememberJobDraft();
     this._syncSaveButton();
     this._sampleTemps();
@@ -4158,7 +4307,7 @@ class CrealityCard extends HTMLElement {
     show("cam-bar", tiles.camera || !!(cfg.progress || cfg.status || cfg.pause || cfg.resume || cfg.stop));
 
     // No job: percentage, file, layer, bar, estimates and material used are hidden.
-    show("progress-head", !noJob && !!(cfg.progress || cfg.time_left || cfg.time_left_estimated));
+    show("progress-head", !noJob && !!(cfg.progress || cfg.time_left));
     show("big-pct", !!cfg.progress);
     show("file-row", !noJob && !!cfg.object);
     show("layer-row", !noJob && !!cfg.layer);
@@ -4166,7 +4315,7 @@ class CrealityCard extends HTMLElement {
     show("bar-row", !noJob && !!cfg.progress);
     show("timing-real", !!cfg.job_time);
     show("timing-creality", !!cfg.time_left);
-    show("timings", !noJob && !!(cfg.job_time || cfg.time_left || cfg.time_left_estimated));
+    show("timings", !noJob && !!(cfg.job_time || cfg.time_left));
     show("times", !noJob && !!cfg.used_material);
 
     // Controls: speed/flow, home, fans and X/Y/Z, each only when configured.
@@ -4214,9 +4363,14 @@ class CrealityCard extends HTMLElement {
     if (this._cfg.status) parts.push(prettyStatus(this._val("status", "unknown")));
     if (this._cfg.progress) parts.push(`${progressPct(this._val("progress"), this._st("progress")).toFixed(0)}%`);
     if (this._cfg.layer && layerText) parts.push(`Layer ${layerText}`);
-    const eta = this._root.getElementById("progress-eta")?.textContent;
+    const eta = this._zoomEta();
     if (eta) parts.push(eta);
     this._setText("camera-zoom-info", parts.join(" · "));
+  }
+
+  /** Time left and finish clock for the enlarged camera's status line. */
+  _zoomEta() {
+    return this._root.getElementById("progress-eta")?.textContent || "";
   }
 
   _toggleZoomFullscreen() {
@@ -4557,6 +4711,506 @@ class CrealityCard extends HTMLElement {
   }
 }
 
+const COMPACT_TAG = "creality-compact-card";
+
+// Config keys the compact card uses; all share their meaning with the full card.
+const COMPACT_KEYS = [
+  "title", "status", "camera", "preview", "progress", "object", "layer", "total_layers", "job_time",
+  "time_left", "filament", "print_energy",
+  "printer_switch", "pause", "resume", "stop",
+];
+
+const COMPACT_LABELS = {
+  preview: "Printer thumbnail",
+  print_energy: "Power sensor",
+};
+
+const COMPACT_HELPERS = {
+  preview: "Shown in the G-code tile while the G-code view is not available.",
+  print_energy: "Power (W) sensor of the printer's plug or room meter. The card shows the printer's share, without the power offset set on the full card (else the reading before the printer was switched on).",
+};
+
+/**
+ * custom:creality-compact-card: camera, G-code view, status, progress, layers,
+ * finish time and power in a small tile. Shares the full card's
+ * camera, G-code profile, banner and power-on code by extending it.
+ */
+class CrealityCompactCard extends CrealityCard {
+  static async getStubConfig(hass, entities, entitiesFallback) {
+    const defaults = await integrationDefaults(hass, entities, entitiesFallback);
+    return Object.fromEntries(Object.entries(defaults).filter(([key]) => COMPACT_KEYS.includes(key)));
+  }
+
+  static getConfigForm() {
+    const entity = (name, domain) => ({ name, selector: { entity: { domain } } });
+    const group = (name, title, schema) => ({ name, type: "expandable", flatten: true, title, schema });
+    return {
+      schema: [
+        { name: "title", selector: { text: {} } },
+        entity("status", "sensor"),
+        entity("camera", "camera"),
+        entity("preview", "image"),
+        group("print_group", "Print", ["progress", "object", "layer", "total_layers", "job_time", "time_left", "filament"]
+          .map((name) => entity(name, "sensor"))),
+        group("power_group", "Power", [entity("print_energy", "sensor"), entity("printer_switch", "switch")]),
+        group("print_actions_group", "Print actions", ["pause", "resume", "stop"].map((name) => entity(name, "button"))),
+      ],
+      computeLabel: (schema) => COMPACT_LABELS[schema.name] || LABELS[schema.name] || undefined,
+      computeHelper: (schema) => COMPACT_HELPERS[schema.name] || HELPERS[schema.name] || undefined,
+    };
+  }
+
+  setConfig(config) {
+    const nested = config.entities && typeof config.entities === "object" ? config.entities : {};
+    // No default title: without one the header holds only the status.
+    this._cfg = { ...nested, ...config };
+    delete this._cfg.entities;
+    this._built = false;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._built) {
+      this._render();
+      return;
+    }
+    if (this._watchedChanged(hass)) this._update();
+  }
+
+  get hass() {
+    return this._hass;
+  }
+
+  getCardSize() {
+    return 5;
+  }
+
+  getGridOptions() {
+    return { columns: 6, rows: "auto", min_columns: 4, min_rows: 3 };
+  }
+
+  connectedCallback() {
+    if (this._cfg && this._hass && !this._built) this._render();
+    else if (this._built) this._update();
+  }
+
+  disconnectedCallback() {
+    // Stop the camera stream and profile polling while the card is not shown.
+    clearTimeout(this._profileTimer);
+    this._profileTimer = undefined;
+    this._profileKey = undefined;
+    this._closeCameraZoom();
+    this._root.getElementById("camera")?.querySelector("img, .camera-live")?.remove();
+  }
+
+  _render() {
+    if (!this._cfg) return;
+    this._root.innerHTML = `
+      <ha-card>
+        <style>
+          :host { display: block; container-type: inline-size; container-name: creality-compact; }
+          [hidden] { display: none !important; }
+          ha-card {
+            --cp-bg: var(--ha-card-background, var(--card-background-color, #1b1b1b));
+            --cp-border: var(--divider-color, #3c3c3c);
+            --cp-text: var(--primary-text-color, #f2f2f2);
+            --cp-muted: var(--secondary-text-color, #9a9a9a);
+            --cp-input: var(--input-fill-color, var(--card-background-color, #1f1f1f));
+            --cp-inset: var(--primary-background-color, #141414);
+            --cp-accent: var(--creality-accent-color, #2dce89);
+            background: var(--cp-bg);
+            color: var(--cp-text);
+            border: 1px solid var(--cp-border);
+            overflow: hidden;
+          }
+          .wrap { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+          .head { display: flex; align-items: center; gap: 8px; }
+          .title { flex: 1 1 auto; min-width: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .badge { margin-left: auto; flex: none; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: #4a4a4a; color: #fff; }
+          .badge.is-print { background: var(--cp-accent); color: #083322; }
+          .badge.is-pause { background: #fc6d09; }
+          .badge.is-error { background: #e5484d; }
+          .badge.is-idle { background: #5c5c5c; }
+          .offline-notice { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--cp-muted); }
+          #printer-loading { width: 14px; height: 14px; border: 2px solid var(--cp-border); border-top-color: var(--cp-accent); border-radius: 50%; animation: printer-spin 0.8s linear infinite; }
+          @keyframes printer-spin { to { transform: rotate(360deg); } }
+          @media (prefers-reduced-motion: reduce) { #printer-loading { animation: none; } }
+          #printer-power-error { color: var(--error-color, #e85d4c); }
+          .wrap.offline .body, .wrap.offline .alert { display: none; }
+          .act, .icon-btn, .bar-btn {
+            border: 1px solid var(--cp-border); background: var(--cp-input); color: var(--cp-text);
+            border-radius: 8px; cursor: pointer; font: inherit; display: inline-flex; align-items: center; justify-content: center;
+          }
+          .act { padding: 5px 10px; font-size: 12px; font-weight: 600; gap: 6px; }
+          .icon-btn { width: 40px; height: 34px; }
+          .bar-btn { width: 30px; height: 28px; padding: 0; flex: none; }
+          .act:hover, .icon-btn:hover, .bar-btn:hover, .bar-btn:focus-visible { border-color: var(--cp-accent); outline: none; }
+          .bar-btn.stop:hover { border-color: #e5484d; color: #e5484d; }
+          .act[disabled], .bar-btn[disabled] { opacity: 0.35; cursor: default; }
+          .bar-btn ha-icon, .icon-btn ha-icon { --mdc-icon-size: 18px; }
+          .alert {
+            display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 12px;
+            background: #3b2c1b; border: 1px solid #bb8b47;
+          }
+          .alert.is-error { background: #3b1d1f; border-color: #e5484d; }
+          .alert > ha-icon { flex: none; color: #fc6d09; --mdc-icon-size: 18px; }
+          .alert.is-error > ha-icon { color: #e5484d; }
+          .alert-title { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+          .alert .act { flex: none; }
+          .alert-close { flex: none; display: inline-flex; padding: 2px; border: 0; border-radius: 6px; background: none; color: var(--cp-muted); cursor: pointer; }
+          .alert-close:hover { color: var(--cp-text); background: #ffffff14; }
+          .alert-close ha-icon { --mdc-icon-size: 16px; }
+          .body { display: flex; flex-direction: column; gap: 8px; }
+          .media { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
+          .media.single { grid-template-columns: minmax(0, 1fr); }
+          .cam { position: relative; min-width: 0; }
+          .camera-body {
+            aspect-ratio: 16 / 9; background: var(--cp-inset); border: 1px solid var(--cp-border);
+            border-radius: 8px; overflow: hidden; cursor: zoom-in;
+          }
+          /* Streaming (WebRTC) cameras embed HA's own live view and size to the video. */
+          .camera-body:has(.camera-live) { aspect-ratio: auto; }
+          .camera-body img { width: 100%; height: 100%; object-fit: cover; display: block; }
+          .camera-body .empty, .thumb.empty {
+            height: 100%; display: flex; align-items: center; justify-content: center; text-align: center;
+            padding: 6px; box-sizing: border-box; color: var(--cp-muted); font-size: 12px;
+          }
+          .camera-live {
+            display: block; --ha-card-border-width: 0; --ha-card-border-radius: 0;
+            --ha-card-box-shadow: none; --ha-card-background: transparent;
+          }
+          .cam .bar-btn { position: absolute; right: 6px; bottom: 6px; background: #0009; border-color: #ffffff40; color: #fff; }
+          /* The G-code tile takes the camera's height and never sets it. */
+          .gcode { position: relative; min-width: 0; min-height: 90px; }
+          .media.single .gcode { height: 120px; }
+          .thumb {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            background: var(--cp-inset); border: 1px solid var(--cp-border); border-radius: 8px; overflow: hidden;
+          }
+          .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+          .profile { padding: 0; color: inherit; font: inherit; cursor: pointer; }
+          .profile:hover, .profile:focus-visible { border-color: var(--cp-accent); outline: none; }
+          .profile-stage { display: block; width: 100%; height: 100%; box-sizing: border-box; padding: 6px; }
+          .profile svg { width: 100%; height: 100%; display: block; overflow: visible; }
+          .profile .printed { fill: var(--cp-accent); }
+          .profile .remaining { fill: var(--cp-muted); opacity: .35; }
+          .profile .cursor { stroke: var(--cp-accent); stroke-width: 1.5; }
+          .profile.paused .cursor { stroke: #ffb34d; }
+          .layer-caption { display: none; }
+          .job { display: flex; flex-direction: column; gap: 4px; }
+          .job-line { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+          .file { flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--cp-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .pct { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+          .acts { display: flex; gap: 4px; }
+          .bar { height: 6px; background: var(--cp-inset); border-radius: 99px; overflow: hidden; }
+          .bar > span { display: block; height: 100%; width: 0%; background: var(--cp-accent); }
+          .bar.paused > span { background: #fc6d09; }
+          /* The shown stats share one row. */
+          .stats { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
+          /* Phones: values keep the room, icons go. */
+          @container creality-compact (max-width: 400px) {
+            .stat { padding: 5px 6px; }
+            .stat > ha-icon { display: none; }
+          }
+          @container creality-compact (max-width: 360px) {
+            .stats { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          }
+          .stat {
+            display: flex; align-items: center; gap: 6px; min-width: 0; padding: 5px 8px; cursor: pointer;
+            background: var(--cp-inset); border: 1px solid var(--cp-border); border-radius: 8px;
+          }
+          .stat > ha-icon { flex: none; color: var(--cp-muted); --mdc-icon-size: 18px; }
+          .stat > div { min-width: 0; }
+          .stat span, .stat small { display: block; font-size: 10px; color: var(--cp-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .stat span { text-transform: uppercase; letter-spacing: 0.03em; }
+          .stat b { display: block; font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .stat small:empty { display: none; }
+          .camera-zoom {
+            width: min(96vw, calc((90vh - 96px) * 16 / 9), 1600px); max-width: 96vw; padding: 0;
+            border: 1px solid var(--cp-border); border-radius: 12px; background: var(--cp-bg); color: var(--cp-text); overflow: hidden;
+          }
+          .camera-zoom::backdrop { background: #000c; }
+          .camera-zoom-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 8px 8px 14px; font-size: 14px; font-weight: 600; }
+          .camera-zoom-acts { display: flex; gap: 6px; }
+          .camera-zoom-body { background: #000; }
+          .camera-zoom-body img { width: 100%; max-height: calc(90vh - 96px); object-fit: contain; display: block; }
+          .camera-zoom-body:fullscreen { display: flex; align-items: center; justify-content: center; }
+          .camera-zoom-body:fullscreen img, .camera-zoom-body:fullscreen .camera-live { width: 100%; max-height: 100vh; }
+          .camera-zoom-body .empty { padding: 48px; text-align: center; color: var(--cp-muted); }
+          .camera-zoom-f { padding: 8px 14px; font-size: 13px; color: var(--cp-muted); font-variant-numeric: tabular-nums; }
+          .camera-zoom-f:empty { display: none; }
+        </style>
+        <div class="wrap">
+          <div class="head">
+            <span class="title" id="title"></span>
+            <span class="badge" id="status-badge" data-more="status">—</span>
+          </div>
+          <div class="offline-notice" id="offline-notice" hidden>
+            <span id="printer-loading" hidden aria-hidden="true"></span>
+            <span id="offline-message" role="status" aria-live="polite">Printer is offline.</span>
+            <button class="act" id="printer-power" type="button" hidden></button>
+            <span id="printer-power-error" role="alert"></span>
+          </div>
+          <div class="alert" id="printer-alert" role="alert" hidden>
+            <ha-icon id="printer-alert-icon" icon="mdi:alert"></ha-icon>
+            <span class="alert-title" id="printer-alert-title"></span>
+            <button class="alert-close" id="printer-alert-close" type="button" title="Dismiss" aria-label="Dismiss printer alert">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <div class="alert is-error" id="filament-alert" role="alert" hidden>
+            <ha-icon icon="mdi:printer-3d-nozzle-alert"></ha-icon>
+            <span class="alert-title">Filament runout</span>
+            <button class="act" id="filament-heat" type="button" hidden></button>
+            <button class="alert-close" id="filament-alert-close" type="button" title="Dismiss" aria-label="Dismiss filament runout alert">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <div class="body">
+            <div class="media" id="media">
+              <div class="cam" id="camera-tile">
+                <div class="camera-body" id="camera" title="Enlarge camera"><div class="empty">No camera</div></div>
+                <button class="bar-btn" id="camera-expand" type="button" title="Enlarge camera" aria-label="Enlarge camera"><ha-icon icon="mdi:arrow-expand"></ha-icon></button>
+              </div>
+              <div class="gcode" id="gcode-tile">
+                <button class="thumb profile" id="profile" type="button" hidden>
+                  <span class="profile-stage"><svg id="profile-svg" preserveAspectRatio="xMidYMax meet" aria-hidden="true"></svg></span>
+                  <span class="layer-caption" id="profile-caption"></span>
+                </button>
+                <div class="thumb" id="thumb" data-more="preview" hidden></div>
+                <div class="thumb empty" id="profile-empty">No G-code profile</div>
+              </div>
+            </div>
+            <div class="job" id="job">
+              <div class="job-line">
+                <span class="file" id="file" data-more="object"></span>
+                <b class="pct" id="pct" data-more="progress">—</b>
+                <div class="acts">
+                  <button class="bar-btn" id="pause" type="button" title="Pause print" aria-label="Pause print"><ha-icon icon="mdi:pause"></ha-icon></button>
+                  <button class="bar-btn" id="resume" type="button" title="Resume print" aria-label="Resume print"><ha-icon icon="mdi:play"></ha-icon></button>
+                  <button class="bar-btn stop" id="stop" type="button" title="Stop print" aria-label="Stop print"><ha-icon icon="mdi:stop"></ha-icon></button>
+                </div>
+              </div>
+              <div class="bar" id="bar-row"><span id="bar"></span></div>
+            </div>
+            <div class="stats" id="stats">
+              <div class="stat" id="stat-layer" data-more="layer"><ha-icon icon="mdi:layers-triple"></ha-icon>
+                <div><span>Layer</span><b id="c-layer">—</b></div></div>
+              <div class="stat" id="stat-eta" data-more="time_left"><ha-icon icon="mdi:flag-checkered"></ha-icon>
+                <div><span>ETA</span><b id="c-eta">—</b><small id="c-eta-left"></small></div></div>
+              <div class="stat" id="stat-elapsed" data-more="job_time"><ha-icon icon="mdi:timer-outline"></ha-icon>
+                <div><span>Elapsed</span><b id="c-elapsed">—</b></div></div>
+              <div class="stat" id="stat-power" data-more="print_energy"><ha-icon icon="mdi:flash"></ha-icon>
+                <div><span id="c-power-label">Power</span><b id="c-power">—</b></div></div>
+            </div>
+          </div>
+        </div>
+        <dialog class="camera-zoom" id="camera-zoom" aria-labelledby="camera-zoom-title">
+          <div class="camera-zoom-h">
+            <span id="camera-zoom-title">Camera</span>
+            <div class="camera-zoom-acts">
+              <button class="icon-btn" id="camera-zoom-snapshot" type="button" title="Download snapshot" aria-label="Download snapshot">
+                <ha-icon icon="mdi:camera"></ha-icon>
+              </button>
+              <button class="icon-btn" id="camera-zoom-fullscreen" type="button" title="Fullscreen" aria-label="Fullscreen">
+                <ha-icon icon="mdi:fullscreen"></ha-icon>
+              </button>
+              <button class="icon-btn" id="camera-zoom-close" type="button" title="Close" aria-label="Close camera">
+                <ha-icon icon="mdi:close"></ha-icon>
+              </button>
+            </div>
+          </div>
+          <div class="camera-zoom-body" id="camera-zoom-body"></div>
+          <div class="camera-zoom-f" id="camera-zoom-info" role="status"></div>
+        </dialog>
+      </ha-card>
+    `;
+    this._profileDrawn = null; // Fresh DOM: the profile must be drawn again.
+    this._bind();
+    this._built = true;
+    this._lastStates = {};
+    this._watchedChanged(this._hass);
+    this._update();
+  }
+
+  _bind() {
+    const on = (id, event, fn) => this._root.getElementById(id)?.addEventListener(event, fn);
+    on("printer-power", "click", () => this._togglePrinterPower());
+    on("pause", "click", () => this._confirmPress(this._cfg.pause, "Pause the current print?"));
+    on("resume", "click", () => this._confirmPress(this._cfg.resume, "Resume the current print?"));
+    on("stop", "click", () => this._confirmPress(this._cfg.stop, "Stop the current print?"));
+    on("camera", "click", () => this._openCameraZoom());
+    on("camera-expand", "click", () => this._openCameraZoom());
+    on("camera-zoom-close", "click", () => this._closeCameraZoom());
+    on("camera-zoom-fullscreen", "click", () => this._toggleZoomFullscreen());
+    on("camera-zoom-snapshot", "click", () => this._downloadSnapshot());
+    const zoom = this._root.getElementById("camera-zoom");
+    // A click on the backdrop lands on the dialog itself.
+    zoom?.addEventListener("click", (ev) => { if (ev.target === zoom) this._closeCameraZoom(); });
+    // The small preview resumes once the enlarged stream is dropped (not while offline).
+    zoom?.addEventListener("close", () => {
+      this._root.getElementById("camera-zoom-body")?.replaceChildren();
+      if (!this._root.querySelector(".wrap")?.classList.contains("offline")) this._syncCamera();
+    });
+    on("profile", "click", () => {
+      this._profileAxis = this._profileAxis === "y" ? "x" : "y";
+      this._drawProfile();
+    });
+    on("printer-alert-close", "click", () => this._dismissPrinterAlert());
+    on("filament-heat", "click", () => this._heatForFilamentChange());
+    on("filament-alert-close", "click", () => {
+      this._filamentAlertDismissed = true;
+      this._syncFilamentAlert();
+    });
+    this._root.querySelectorAll("[data-more]").forEach((el) => {
+      el.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        this._moreInfo(this._cfg[el.dataset.more]);
+      });
+    });
+  }
+
+  _update() {
+    if (!this._built || !this._cfg) return;
+    const cfg = this._cfg;
+    this._setText("title", cfg.title || "");
+    const status = this._val("status", cfg.status ? "unknown" : "");
+    const badge = this._root.getElementById("status-badge");
+    if (badge) {
+      badge.hidden = !cfg.status;
+      badge.textContent = prettyStatus(status);
+      badge.className = `badge ${statusClass(status)}`;
+    }
+    if (this._updateOffline()) return;
+    this._syncPrinterAlert();
+    this._syncFilamentAlert();
+
+    const noJob = this._noJob(status);
+    const show = (id, visible) => {
+      const el = this._root.getElementById(id);
+      if (el) el.hidden = !visible;
+    };
+    // Tiles and stats whose entity is not configured are left out.
+    const camera = !!cfg.camera;
+    const gcode = !!(cfg.status || cfg.preview);
+    show("media", camera || gcode);
+    show("camera-tile", camera);
+    show("gcode-tile", gcode);
+    this._root.getElementById("media")?.classList.toggle("single", !(camera && gcode));
+    if (!camera) this._closeCameraZoom();
+    show("job", !noJob && !!(cfg.progress || cfg.object || cfg.pause || cfg.resume || cfg.stop));
+    show("file", !!cfg.object);
+    show("pct", !!cfg.progress);
+    show("bar-row", !!cfg.progress);
+    const stats = {
+      "stat-layer": !noJob && !!cfg.layer,
+      "stat-eta": !noJob && !!cfg.time_left,
+      "stat-elapsed": !noJob && !!cfg.job_time,
+      "stat-power": !!cfg.print_energy,
+    };
+    for (const [id, visible] of Object.entries(stats)) show(id, visible);
+    show("stats", Object.values(stats).some(Boolean));
+
+    const file = this._val("object");
+    this._setText("file", file && file !== "unknown" ? file : "—");
+    const pct = progressPct(this._val("progress"), this._st("progress"));
+    this._setText("pct", `${pct.toFixed(0)}%`);
+    const bar = this._root.getElementById("bar");
+    if (bar) bar.style.width = `${pct}%`;
+    this._root.getElementById("bar-row")?.classList.toggle("paused", statusClass(status) === "is-pause");
+    this._syncPrintActions(status);
+
+    this._setText("c-layer", formatLayers(this._val("layer"), this._val("total_layers")) || "—");
+    this._syncEta(status);
+    this._setText("c-elapsed", fmtDuration(this._val("job_time")));
+    if (!this._prefsLoaded && cfg.print_energy && this._hass?.callWS) this._loadPowerOffset();
+    this._syncPowerNow();
+
+    this._syncProfile();
+    this._syncCameraViews();
+  }
+
+  /** Finish clock and time left from the printer's estimate; "Done" once completed. */
+  _syncEta(status) {
+    const st = String(status).toLowerCase();
+    const left = ACTIVE_STATUSES.includes(st) ? parseDurationSeconds(this._val("time_left")) : null;
+    let clock = "—";
+    let leftText = "";
+    if (st === "completed") clock = "Done";
+    else if (left != null) {
+      clock = fmtClock(new Date(Date.now() + left * 1000), this._hass?.locale);
+      leftText = `${fmtDuration(left)} left`;
+    }
+    this._setText("c-eta", clock);
+    this._setText("c-eta-left", leftText);
+    this._etaText = st === "completed" ? "Done" : leftText ? `${leftText} · ETA ${clock}` : "";
+  }
+
+  _zoomEta() {
+    return this._etaText || "";
+  }
+
+  /**
+   * Printer's power draw: the meter reading minus the power offset entered on
+   * the full card, else minus the reading at the printer's last power-on.
+   * Also called by the full card's offset lookup when it completes.
+   */
+  _syncPowerNow(meter = this._cardMeter()) {
+    if (!this._root?.getElementById("stat-power")) return;
+    let label = "Power";
+    let value = "—";
+    let title = "";
+    const st = this._st("print_energy");
+    if (meter) {
+      const [mode, factor] = meter.kind;
+      const reading = parseFloat(st?.state) * factor;
+      if (mode === "energy") {
+        // An energy counter has no live power; show its total instead.
+        label = "Energy";
+        if (Number.isFinite(reading)) value = fmtEnergy(reading);
+      } else if (Number.isFinite(reading)) {
+        const offset = this._manualBaselineW() ?? this._displayAutoBaseline(meter);
+        value = `${Math.round(Number.isFinite(offset) ? Math.max(0, reading - offset) : reading)} W`;
+        title = Number.isFinite(offset)
+          ? `Meter ${Math.round(reading)} W, power offset ${Math.round(offset)} W removed`
+          : `Meter ${Math.round(reading)} W`;
+      }
+    } else if (st && !isMissingState(st.state)) {
+      value = `${st.state} ${st.attributes?.unit_of_measurement || ""}`.trim();
+    }
+    this._setText("c-power-label", label);
+    this._setText("c-power", value);
+    this._root.getElementById("stat-power").title = title;
+  }
+
+  /** Read the power offset from the print-history preferences the full card saves. */
+  async _loadPowerOffset() {
+    this._prefsLoaded = true;
+    let store = this._readLocalPrintStore();
+    try {
+      store = (await this._fetchServerPrintStore()) || store;
+    } catch (_err) {
+      /* keep this browser's copy */
+    }
+    this._printPrefs = store.prefs;
+    this._syncPowerNow();
+  }
+
+  /** Silhouette when available; otherwise the printer's thumbnail stands in. */
+  _drawProfile() {
+    super._drawProfile();
+    const thumb = this._root?.getElementById("thumb");
+    const empty = this._root?.getElementById("profile-empty");
+    if (!thumb || !empty) return;
+    const url = !this._profile && !this._noJob() ? this._picture(this._cfg.preview) : "";
+    thumb.hidden = !url;
+    if (!url) return;
+    empty.hidden = true;
+    this._syncMedia("thumb", this._cfg.preview, false, "No preview");
+  }
+}
+
 const registeredCard = customElements.get(CARD_TAG);
 if (!registeredCard) {
   customElements.define(CARD_TAG, CrealityCard);
@@ -4575,6 +5229,16 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
     type: CARD_TAG,
     name: "Creality Printer",
     description: "Creality Print-style device card for Ender 3 V3 KE",
+    preview: true,
+  });
+}
+
+if (!customElements.get(COMPACT_TAG)) customElements.define(COMPACT_TAG, CrealityCompactCard);
+if (!window.customCards.some((card) => card.type === COMPACT_TAG)) {
+  window.customCards.push({
+    type: COMPACT_TAG,
+    name: "Creality Printer (compact)",
+    description: "Camera, G-code view, status, layers, finish time and power in a small card",
     preview: true,
   });
 }

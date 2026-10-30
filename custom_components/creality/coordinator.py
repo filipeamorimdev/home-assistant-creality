@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from datetime import timedelta
 from typing import Any
@@ -22,6 +21,7 @@ from .const import (
     STATE_STOPPED,
 )
 from .errors import is_fatal_error, lookup_error
+from .gcode_archive import GcodeArchiver
 from .ws_client import CrealityWsClient
 from .profile_monitor import ProfileMonitor
 from .timelapse import TimelapseIndex
@@ -29,14 +29,6 @@ from .timelapse_archive import TimelapseArchiver
 
 _LOGGER = logging.getLogger(__name__)
 
-_SLICER_HM = re.compile(r"(\d+)\s*h\s*(\d+)\s*m", re.I)
-_SLICER_H = re.compile(r"(?:^|[_\-\s])(\d+)\s*h(?:[_\-\s.]|$)", re.I)
-_SLICER_M = re.compile(r"(?:^|[_\-\s])(\d+)\s*m(?:[_\-\s.]|$)", re.I)
-
-# Statuses for which a remaining-time estimate is meaningful.
-_ACTIVE_STATUSES = frozenset({"printing", "paused", "processing"})
-# The own estimate also stays visible on the finished job, next to the real time.
-_PLAN_STATUSES = _ACTIVE_STATUSES | {"completed"}
 # The printer streams ~5 frames/s. Values that change with nearly every frame
 # are published at most once per PUBLISH_INTERVAL so HA does not record tens of
 # thousands of state changes per printing hour; any other key (state, errors,
@@ -53,46 +45,12 @@ _HIGH_RATE_KEYS = frozenset({
 _HISTORY_LIST_KEY = "historyList"
 
 
-def slicer_hint_seconds(file_name: str | None) -> int | None:
-    """Slicer ETA embedded in Creality filenames, e.g. ``part_PETG_2h9m.gcode``."""
-    if not file_name:
-        return None
-    s = str(file_name)
-    m = _SLICER_HM.search(s)
-    if m:
-        return int(m.group(1)) * 3600 + int(m.group(2)) * 60
-    h = _SLICER_H.search(s)
-    mins = _SLICER_M.search(s)
-    if h and mins:
-        return int(h.group(1)) * 3600 + int(mins.group(1)) * 60
-    if h:
-        return int(h.group(1)) * 3600
-    return None
-
-
 def job_key(data: dict[str, Any]) -> str | None:
     """Identify a print job; None when no file is loaded."""
     fname = str(data.get("printFileName") or "").strip()
     if not fname:
         return None
     return f"{fname}|{data.get('printStartTime') or ''}|{data.get('printId') or ''}"
-
-
-def initial_estimate_seconds(data: dict[str, Any]) -> int | None:
-    """Whole-job duration known when a print starts.
-
-    The slicer hint in the filename, else the printer's elapsed + left time
-    (only once it reports a nonzero time left).
-    """
-    hint = slicer_hint_seconds(data.get("printFileName"))
-    if hint is not None:
-        return hint
-    try:
-        elapsed = float(data.get("printJobTime") or 0)
-        left = float(data.get("printLeftTime"))
-    except (TypeError, ValueError):
-        return None
-    return int(round(elapsed + left)) if left > 0 else None
 
 
 def map_print_status(data: dict[str, Any], terminal_job: str | None = None) -> str:
@@ -165,10 +123,6 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._peak_file: str | None = None
         self._terminal_job: str | None = None
         self._paused = False
-        # Integration ETA is opt-in (config switch, restored by the switch entity).
-        self.own_estimate = False
-        # Own estimate, fixed once per job: {"job", "total" (s), "finish" (epoch s)}.
-        self.plan: dict[str, Any] | None = None
         self._last_publish = 0.0
         self._publish_handle: Any = None
         # Merged telemetry survives disconnects (latches), so after a
@@ -181,11 +135,13 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.profile = ProfileMonitor(self)
         self.timelapse = TimelapseIndex(self)
         self.archive = TimelapseArchiver(self)
+        self.gcode = GcodeArchiver(self)
         # Options that need a reload when changed (set by async_setup_entry).
         self.setup_options: dict[str, Any] = {}
 
     async def async_start(self) -> None:
         await self.archive.async_start()
+        await self.gcode.async_start()
         await self.client.start()
         ok = await self.client.wait_connected(12.0)
         if not ok:
@@ -196,6 +152,7 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.client.stop()
         await self.profile.async_stop()
         await self.archive.async_stop()
+        await self.gcode.async_stop()
 
     async def ensure_connected(self) -> bool:
         if self.client.connected:
@@ -225,6 +182,7 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _on_message(self, frame: dict[str, Any]) -> None:
         self.timelapse.observe(frame)
+        self.gcode.files.observe(frame)
         frame.pop(_HISTORY_LIST_KEY, None)
         if not frame:
             return
@@ -235,9 +193,9 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._check_reconnect_job()
         self.profile.observe(self.data)
         self.archive.observe(self.data)
+        self.gcode.observe(self.data)
         self._update_terminal_job()
         self._update_layer_peaks()
-        self._update_plan()
         self._paused = self._compute_paused()
         if not frame.keys() <= _HIGH_RATE_KEYS or time.monotonic() - self._last_publish >= PUBLISH_INTERVAL:
             self._publish()
@@ -256,33 +214,6 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._publish_handle is not None:
             self._publish_handle.cancel()
             self._publish_handle = None
-
-    @callback
-    def set_own_estimate(self, enabled: bool) -> None:
-        self.own_estimate = enabled
-        self._publish()
-
-    @callback
-    def restore_plan(self, plan: Any) -> None:
-        """Seed the own estimate saved before an HA restart (used if the job matches)."""
-        if self.plan is None and isinstance(plan, dict) and plan.get("job"):
-            self.plan = plan
-
-    def _update_plan(self) -> None:
-        """Latch the own estimate when a job starts; it is not updated afterwards."""
-        job = job_key(self.data)
-        if not job or self._state() not in (STATE_PRINTING, STATE_PAUSED):
-            return
-        if self.plan is not None and self.plan.get("job") == job:
-            return
-        total = initial_estimate_seconds(self.data)
-        if total is None:
-            return
-        try:
-            elapsed = float(self.data.get("printJobTime") or 0)
-        except (TypeError, ValueError):
-            elapsed = 0.0
-        self.plan = {"job": job, "total": total, "finish": time.time() - elapsed + total}
 
     def _check_reconnect_job(self) -> None:
         """First state report after a (re)connect: keep job data only if resumable.
@@ -365,11 +296,6 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Stays "offline" until the reconnect check has seen fresh state.
         status = map_print_status(d, self._terminal_job) if self.live else "offline"
         out["__print_status"] = status
-        plan = self.plan
-        if not (self.own_estimate and status in _PLAN_STATUSES and plan and plan.get("job") == job_key(d)):
-            plan = None
-        out["__eta_ours"] = plan["total"] if plan else None
-        out["__eta_ours_finish"] = plan["finish"] if plan else None
         out["__peak_layer"] = self._peak_layer
         out["__peak_total_layer"] = self._peak_total_layer
         # Prefer live layers unless reset after finish

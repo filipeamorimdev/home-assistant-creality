@@ -8,7 +8,7 @@ globalThis.HTMLElement = class {};
 globalThis.customElements = {
   whenDefined: async () => {},
   get: () => undefined,
-  define: (_, cls) => { Card = cls; },
+  define: (name, cls) => { if (name === 'creality-card') Card = cls; },
 };
 globalThis.window = {};
 const source = fs.readFileSync(new URL('../custom_components/creality/frontend/creality-card.js', import.meta.url));

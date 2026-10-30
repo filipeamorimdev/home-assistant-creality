@@ -63,10 +63,13 @@ test("late and duplicate module loads keep a single registered card", async () =
   });
   await load(context);
   const Card = context.customElements.get("creality-card");
+  const Compact = context.customElements.get("creality-compact-card");
   assert.ok(new Card());
+  assert.ok(new Compact() instanceof Card, "the compact card reuses the full card's code");
   await load(context);
   assert.equal(context.customElements.get("creality-card"), Card);
-  assert.equal(context.window.customCards.length, 1);
+  assert.equal(context.customElements.get("creality-compact-card"), Compact);
+  assert.deepEqual(Array.from(context.window.customCards, (card) => card.type), ["creality-card", "creality-compact-card"]);
 });
 
 test("an older standalone card registered first is reported, not replaced", async () => {
@@ -430,6 +433,44 @@ test("without a switch, the baseline is read 2 minutes before print status left 
   const measured = await card._measureMeterEnergy(HOUR_JOB);
   assert.equal(measured.baselineW, 100);
   assert.ok(Math.abs(measured.kwh - 0.3) < 1e-9);
+});
+
+test("an HA restart or reconnect is not a power-on: the printer's own draw is not removed", async () => {
+  // Smart plug on the printer only: 0 W while off, 15 W idle, 200 W printing.
+  const { card } = await meterCard("W", [
+    { s: "0", lu: T0 - 90000 }, { s: "15", lu: T0 - 80000 }, { s: "200", lu: T0 },
+  ], { "sensor.status": [
+    { s: "offline", lu: T0 - 90000 }, { s: "idle", lu: T0 - 79900 },
+    // Home Assistant restarted an hour before the print, and the Wi-Fi dropped for 40 s.
+    { s: "unavailable", lu: T0 - 3660 }, { s: "offline", lu: T0 - 3630 }, { s: "idle", lu: T0 - 3600 },
+    { s: "offline", lu: T0 - 1240 }, { s: "idle", lu: T0 - 1200 },
+  ] });
+  const measured = await card._measureMeterEnergy(HOUR_JOB);
+  assert.equal(measured.baselineW, 0, "reading before the real power-on, not the printer idling");
+  assert.ok(Math.abs(measured.kwh - 0.2) < 1e-9);
+});
+
+test("a quick plug off/on is skipped; its stale reading is not the room load", async () => {
+  // The plug still showed the printer's 150 W when it was switched back on 20 s later.
+  const { card } = await meterCard("W", [
+    { s: "40", lu: T0 - 20000 }, { s: "150", lu: T0 - 9000 }, { s: "390", lu: T0 },
+  ], { "switch.printer": [
+    { s: "off", lu: T0 - 30000 }, { s: "on", lu: T0 - 9000 }, { s: "off", lu: T0 - 3620 }, { s: "on", lu: T0 - 3600 },
+  ] });
+  card._cfg.printer_switch = "switch.printer";
+  const measured = await card._measureMeterEnergy(HOUR_JOB);
+  assert.equal(measured.baselineW, 40, "room load before the last real power-on");
+  assert.ok(Math.abs(measured.kwh - 0.35) < 1e-9);
+});
+
+test("energy window starts when the job became active, before the printer's start time", async () => {
+  const { card, calls } = await meterCard("W", [{ s: "300", lu: T0 - 600 }], { "sensor.status": [
+    { s: "idle", lu: T0 - 5000 }, { s: "processing", lu: T0 - 300 }, { s: "printing", lu: T0 + 5 },
+  ] });
+  const measured = await card._measureMeterEnergy(HOUR_JOB);
+  assert.equal(calls.at(-1).start_time, new Date((T0 - 300) * 1000).toISOString());
+  // 300 W from preparation (5 min) to the end of the one-hour job.
+  assert.ok(Math.abs(measured.kwh - 0.325) < 1e-9);
 });
 
 test("card meter marks gaps and late history partial; no samples is unavailable", async () => {

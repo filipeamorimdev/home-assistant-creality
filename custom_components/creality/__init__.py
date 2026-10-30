@@ -19,6 +19,7 @@ from homeassistant.helpers.storage import Store
 from . import errors, websocket
 from .const import CARD_URL, CARD_VERSION, CONF_HOST, DOMAIN, LIVE_OPTIONS
 from .coordinator import CrealityCoordinator
+from .gcode_archive import gcode_store_key
 from .legacy_card import async_check_legacy_resources
 from .timelapse import SavedTimelapseView, TimelapseView
 from .timelapse_archive import archive_store_key
@@ -27,6 +28,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # Options key of the retired background print-energy tracking.
 _LEGACY_ENERGY_OPTION = "energy_sensor"
+# (domain, unique-ID suffix) of retired entities: the integration's own time
+# estimate sensor and the switch that enabled it.
+_RETIRED_ENTITIES = (("sensor", "print_time_left_estimated"), ("switch", "own_estimate"))
 
 FRONTEND_FILE = Path(__file__).parent / "frontend" / "creality-card.js"
 
@@ -39,7 +43,6 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.FAN,
     Platform.LIGHT,
-    Platform.SWITCH,
     Platform.BINARY_SENSOR,
     Platform.CAMERA,
     Platform.IMAGE,
@@ -73,9 +76,18 @@ async def _async_drop_background_energy(hass: HomeAssistant, entry: ConfigEntry)
         await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.energy").async_remove()
 
 
+def _drop_retired_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove registry entries of entities the integration no longer provides."""
+    registry = er.async_get(hass)
+    for domain, suffix in _RETIRED_ENTITIES:
+        if stale := registry.async_get_entity_id(domain, DOMAIN, f"{entry.entry_id}_{suffix}"):
+            registry.async_remove(stale)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = entry.data[CONF_HOST]
     await _async_drop_background_energy(hass, entry)
+    _drop_retired_entities(hass, entry)
     # Read the error-code DB off the event loop before telemetry starts arriving.
     await hass.async_add_executor_job(errors.preload)
     coordinator = CrealityCoordinator(hass, entry, host)
@@ -107,6 +119,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Delete per-entry persisted data when the printer is removed."""
     await Store(hass, 1, archive_store_key(entry.entry_id)).async_remove()
+    await Store(hass, 1, gcode_store_key(entry.entry_id)).async_remove()
 
 
 def _reload_options(entry: ConfigEntry) -> dict:

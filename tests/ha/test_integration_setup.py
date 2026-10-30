@@ -106,16 +106,9 @@ async def test_setup_entities_controls_and_offline(hass, fake_client, frontend_s
 
     status = hass.states.get(entity_id(hass, "sensor", entry, "print_status"))
     assert status.state == "printing"
-    eta_id = entity_id(hass, "sensor", entry, "print_time_left_estimated")
-    # The integration's own estimate is opt-in through a config switch.
-    assert hass.states.get(eta_id).state == STATE_UNAVAILABLE
-    own = entity_id(hass, "switch", entry, "own_estimate")
-    assert hass.states.get(own).state == "off"
-    await hass.services.async_call("switch", "turn_on", {"entity_id": own}, blocking=True)
-    eta = hass.states.get(eta_id)
-    # Fixed at the job's start from the filename hint (1h30m), with its finish time.
-    assert eta.state == "5400"
-    assert eta.attributes["expected_finish"]
+    # The integration's own time estimate and its switch were removed.
+    assert entity_id(hass, "sensor", entry, "print_time_left_estimated") is None
+    assert entity_id(hass, "switch", entry, "own_estimate") is None
     nozzle_target = hass.states.get(entity_id(hass, "number", entry, "nozzle_target"))
     assert float(nozzle_target.attributes["max"]) == 280  # limit read after setup
     flow = hass.states.get(entity_id(hass, "number", entry, "flow_tuning"))
@@ -170,7 +163,7 @@ async def test_remove_entry_deletes_stores(hass, fake_client, frontend_stub):
     with patch("custom_components.creality.Store.async_remove", new=AsyncMock()) as remove:
         assert await hass.config_entries.async_remove(entry.entry_id)
         await hass.async_block_till_done()
-    assert remove.await_count == 1  # Timelapse auto-save.
+    assert remove.await_count == 2  # Timelapse auto-save and G-code copies.
 
 
 async def test_setup_drops_retired_background_energy(hass, fake_client, frontend_stub):
@@ -188,6 +181,19 @@ async def test_setup_drops_retired_background_energy(hass, fake_client, frontend
     remove.assert_awaited_once()
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert "energy_sensor" not in result["data_schema"].schema
+
+
+async def test_setup_drops_retired_time_estimate(hass, fake_client, frontend_stub):
+    entry = MockConfigEntry(domain=DOMAIN, title="K2", unique_id="10.0.0.31",
+                            data={"host": "10.0.0.31", "name": "K2"}, options={"camera_mode": "auto"})
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    for domain, suffix in (("sensor", "print_time_left_estimated"), ("switch", "own_estimate")):
+        registry.async_get_or_create(domain, DOMAIN, f"{entry.entry_id}_{suffix}", config_entry=entry)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entity_id(hass, "sensor", entry, "print_time_left_estimated") is None
+    assert entity_id(hass, "switch", entry, "own_estimate") is None
 
 
 async def test_options_require_custom_camera_url(hass, fake_client, frontend_stub):
@@ -414,7 +420,7 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     from aiohttp import web
     from homeassistant.components.http import KEY_HASS
     from custom_components.creality.timelapse import SAVED_VIEW_URL, VIEW_URL, SavedTimelapseView, TimelapseView
-    from custom_components.creality.timelapse_archive import archive_name
+    from custom_components.creality.timelapse_archive import archive_name, legacy_archive_stamp
     from custom_components.creality.websocket import ws_timelapse
 
     entry = await setup_entry(hass)
@@ -455,8 +461,16 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     assert (await lookup(3, FRAME["printStartTime"])) == {"status": "unavailable"}
 
     # A copy on disk is served from the folder, also while the printer is offline,
-    # found by the recorded name or by the job's start-time prefix.
-    stamp = archive_name({"id": FRAME["printStartTime"]})[:-4]
+    # found by the recorded name or by the job's start time: in timelapses/<day>/...
+    dated = tmp_path / archive_name(TIMELAPSES[0])
+    dated.parent.mkdir(parents=True)
+    dated.write_bytes(b"dated-video")
+    result = await lookup(5, FRAME["printStartTime"])
+    assert result["saved_as"] == str(dated)
+    assert result["filename"] == dated.name
+    dated.unlink()
+    # ...or saved directly in the folder by an older version.
+    stamp = legacy_archive_stamp(FRAME["printStartTime"])
     (tmp_path / f"{stamp}_part.mp4.part").write_bytes(b"partial")
     (tmp_path / f"{stamp}_part.mp4").write_bytes(b"saved-video")
     result = await lookup(4, FRAME["printStartTime"])
@@ -511,15 +525,20 @@ async def test_timelapse_lookup_and_proxy(hass, fake_client, frontend_stub, aioc
     assert (await http.get(saved_path)).status == 404
 
 
+def files_in(folder):
+    return sorted(p for p in folder.rglob("*") if p.is_file())
+
+
 def test_timelapse_archive_name():
     from homeassistant.util import dt as dt_util
     from custom_components.creality.timelapse_archive import archive_name
 
-    stamp = dt_util.as_local(dt_util.utc_from_timestamp(1789990474)).strftime("%Y-%m-%d_%H%M%S")
-    assert archive_name(TIMELAPSES[0]) == f"{stamp}_part_PLA_1h30m.mp4"
-    # Share-hostile characters are replaced; no G-code name keeps the timestamp only.
-    assert archive_name({"id": 1789990474, "gcodename": "/x/a:b?c.gcode"}) == f"{stamp}_a_b_c.mp4"
-    assert archive_name({"id": 1789990474}) == f"{stamp}.mp4"
+    local = dt_util.as_local(dt_util.utc_from_timestamp(1789990474))
+    day, hhmm = local.strftime("%Y%m%d"), local.strftime("%H%M")
+    assert archive_name(TIMELAPSES[0]) == f"timelapses/{day}/{hhmm} - part_PLA_1h30m.mp4"
+    # Share-hostile characters are replaced; no G-code name keeps the time only.
+    assert archive_name({"id": 1789990474, "gcodename": "/x/a:b?c.gcode"}) == f"timelapses/{day}/{hhmm} - a_b_c.mp4"
+    assert archive_name({"id": 1789990474}) == f"timelapses/{day}/{hhmm}.mp4"
 
 
 async def test_config_flow_validates_timelapse_folder(hass, fake_client, frontend_stub, tmp_path):
@@ -583,7 +602,8 @@ async def test_timelapse_saved_to_folder_after_finish(hass, fake_client, fronten
     await hass.async_block_till_done(wait_background_tasks=True)
     saved = tmp_path / archive_name(TIMELAPSES[0])
     assert saved.read_bytes() == b"mp4-content"
-    assert [p.name for p in tmp_path.iterdir()] == [saved.name]  # No .part left behind.
+    # No .part left behind, and no G-code folder for a file the printer does not serve.
+    assert files_in(tmp_path) == [saved]
     state = hass.states.get(sensor_id)
     assert state.state == "saved"
     assert state.attributes["last_file"] == str(saved)
@@ -609,7 +629,7 @@ async def test_timelapse_saved_to_folder_after_finish(hass, fake_client, fronten
     assert state.state == "failed"
     assert "incomplete" in state.attributes["last_error"]
     assert state.attributes["pending"] == 1
-    assert not list(tmp_path.iterdir())
+    assert files_in(tmp_path) == []
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -673,6 +693,143 @@ async def test_timelapse_settings_and_save_from_card(hass, fake_client, frontend
     assert saved.read_bytes() == b"mp4-content"
     assert hass.states.get(sensor_id).state == "saved"
     assert await call(ws_timelapse_save, type="creality/timelapse_save", print_start_time=42) == "missing"
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+GCODE = b"M83\n;LAYER_CHANGE\n;Z:0.2\nG1 X0 Y0\nG1 X10 Y5 E1\n"
+GCODE_URL = "http://10.0.0.24/downloads/gcode/part_PLA_1h30m.gcode"
+
+
+def printer_listing(*files):
+    """``retGcodeFileInfo`` the way the printer sends it: ``dir:name:size:layer:ctime:?:thumb``."""
+    info = ";".join(f"/usr/data/printer_data/gcodes:{name}:{size}:0.2:1789990000:0:" for name, size in files)
+    return {"retGcodeFileInfo": {"totalNum": len(files), "fileInfo": info}}
+
+
+async def test_gcode_saved_once_per_content_after_finish(hass, fake_client, frontend_stub, aioclient_mock, tmp_path):
+    hass.config.allowlist_external_dirs = {str(tmp_path)}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(GCODE_URL, content=GCODE)
+    entry = await setup_entry(hass, timelapse_folder=str(tmp_path), timelapse_auto_save=False)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    gcode_dir = tmp_path / "gcode-files"
+
+    coordinator._on_message(dict(FRAME))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not gcode_dir.exists()  # Copied once the job ends, not while it prints.
+    coordinator._on_message({"state": 2})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    saved = gcode_dir / "part_PLA_1h30m.gcode"
+    assert saved.read_bytes() == GCODE
+    assert files_in(tmp_path) == [saved]
+    found = await coordinator.gcode.async_find(FRAME["printStartTime"])
+    assert found["abs_path"] == str(saved) and found["size"] == len(GCODE)
+    assert found["file"] == FRAME["printFileName"]
+
+    # Printed again with the same content: no second copy.
+    coordinator._on_message({"state": 1, "printStartTime": 1790000000})
+    coordinator._on_message({"state": 2})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert files_in(tmp_path) == [saved]
+    assert (await coordinator.gcode.async_find(1790000000))["abs_path"] == str(saved)
+    # Re-sliced under the same name: both versions are kept.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(GCODE_URL, content=GCODE + b"G1 X20\n")
+    coordinator._on_message({"state": 1, "printStartTime": 1790000100})
+    coordinator._on_message({"state": 4})  # Stopped jobs are kept too.
+    await hass.async_block_till_done(wait_background_tasks=True)
+    second = gcode_dir / "part_PLA_1h30m (2).gcode"
+    assert files_in(tmp_path) == sorted([saved, second])
+    assert await coordinator.gcode.async_saved_jobs() == [FRAME["printStartTime"], 1790000000, 1790000100]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_print_again_from_printer_file_or_saved_copy(hass, fake_client, frontend_stub, aioclient_mock, tmp_path):
+    from custom_components.creality.websocket import ws_gcode_files, ws_print_again
+
+    hass.config.allowlist_external_dirs = {str(tmp_path)}
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(GCODE_URL, content=GCODE)
+    entry = await setup_entry(hass, timelapse_folder=str(tmp_path), timelapse_auto_save=False)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    client = fake_client[0]
+    listing = [("part_PLA_1h30m.gcode", len(GCODE))]
+    client.send_json = AsyncMock(side_effect=lambda payload: coordinator._on_message(printer_listing(*listing)))
+    status_id = entity_id(hass, "sensor", entry, "print_status")
+    connection = MagicMock()
+    start = FRAME["printStartTime"]
+
+    async def call(handler, **msg):
+        connection.reset_mock()
+        handler(hass, connection, {"id": 1, "entity_id": status_id, **msg})
+        await hass.async_block_till_done(wait_background_tasks=True)
+        if connection.send_error.called:
+            return connection.send_error.call_args.args[1]
+        return connection.send_result.call_args.args[1]
+
+    again = {"type": "creality/print_again", "print_start_time": start, "file": "part_PLA_1h30m.gcode"}
+    coordinator._on_message(dict(FRAME))
+    await hass.async_block_till_done()
+    assert await call(ws_print_again, **again) == "busy"
+    coordinator._on_message({"state": 2})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "retGcodeFileInfo" not in coordinator.data
+    assert await call(ws_gcode_files, type="creality/gcode_files") == {
+        "saved": [start], "printer": ["part_PLA_1h30m.gcode"]}
+
+    # Still on the printer and the same size as the saved copy: started as is.
+    client.send_set_retry.reset_mock()
+    coordinator.gcode.files._fetched_at = None
+    assert await call(ws_print_again, **again) == {
+        "file": "/usr/data/printer_data/gcodes/part_PLA_1h30m.gcode", "uploaded": False}
+    client.send_set_retry.assert_awaited_once_with(opGcodeFile="printprt:/usr/data/printer_data/gcodes/part_PLA_1h30m.gcode")
+
+    # Deleted from the printer: the saved copy is uploaded, checked in the list, then started.
+    upload_url = "http://10.0.0.24/upload/part_PLA_1h30m.gcode"
+    aioclient_mock.post(upload_url, status=200)
+    listing.clear()
+
+    def lists_after_upload(url, name):
+        """The printer lists ``name`` once ``url`` received the upload."""
+        def answer(payload):
+            uploaded = any(c[0] == "POST" and str(c[1]) == url for c in aioclient_mock.mock_calls)
+            coordinator._on_message(printer_listing(*listing, *([(name, len(GCODE))] if uploaded else [])))
+        return AsyncMock(side_effect=answer)
+
+    client.send_json = lists_after_upload(upload_url, "part_PLA_1h30m.gcode")
+    client.send_set_retry.reset_mock()
+    coordinator.gcode.files._fetched_at = None
+    assert (await call(ws_print_again, **again))["uploaded"] is True
+    posts = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
+    assert [str(call[1]) for call in posts] == [upload_url]
+    client.send_set_retry.assert_awaited_once_with(opGcodeFile="printprt:/usr/data/printer_data/gcodes/part_PLA_1h30m.gcode")
+
+    # A different file with the same name on the printer is never replaced.
+    other_url = f"http://10.0.0.24/upload/part_PLA_1h30m_{start}.gcode"
+    aioclient_mock.post(other_url, status=200)
+    listing[:] = [("part_PLA_1h30m.gcode", 999)]
+    client.send_json = lists_after_upload(other_url, f"part_PLA_1h30m_{start}.gcode")
+    coordinator.gcode.files._fetched_at = None
+    client.send_set_retry.reset_mock()
+    result = await call(ws_print_again, **again)
+    assert result == {"file": f"/usr/data/printer_data/gcodes/part_PLA_1h30m_{start}.gcode", "uploaded": True}
+
+    # The upload did not show up in the printer's list: nothing is started.
+    client.send_json = AsyncMock(side_effect=lambda payload: coordinator._on_message(printer_listing(("x.gcode", 1))))
+    coordinator.gcode.files._fetched_at = None
+    client.send_set_retry.reset_mock()
+    assert await call(ws_print_again, **again) == "upload_failed"
+    client.send_set_retry.assert_not_awaited()
+    # Neither on the printer nor saved, and the printer offline.
+    coordinator.gcode.files._fetched_at = None
+    assert await call(ws_print_again, type="creality/print_again", print_start_time=42, file="gone.gcode") == "no_gcode"
+    client.connected = False
+    assert await call(ws_print_again, **again) == "offline"
+    assert (await call(ws_gcode_files, type="creality/gcode_files"))["printer"] is None
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

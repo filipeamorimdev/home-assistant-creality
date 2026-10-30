@@ -12,9 +12,11 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_TIMELAPSE_AUTO_SAVE, CONF_TIMELAPSE_FOLDER, DOMAIN
+from .gcode_archive import PrintAgainError
 from .timelapse import SAVED_VIEW_URL, VIEW_URL, download_name, find_video
 from .timelapse_archive import check_folder, folder_suggestions
 
@@ -29,6 +31,8 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_timelapse_settings)
     websocket_api.async_register_command(hass, ws_timelapse_settings_set)
     websocket_api.async_register_command(hass, ws_timelapse_save)
+    websocket_api.async_register_command(hass, ws_gcode_files)
+    websocket_api.async_register_command(hass, ws_print_again)
 
 
 def _coordinator(hass: HomeAssistant, entity_id: str):
@@ -231,3 +235,66 @@ async def ws_timelapse_save(
         connection.send_error(msg["id"], "save_failed", str(err) or type(err).__name__)
         return
     connection.send_result(msg["id"], {"path": path, "filename": os.path.basename(path)})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/gcode_files", vol.Required("entity_id"): str}
+)
+@websocket_api.async_response
+async def ws_gcode_files(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Jobs that can be printed again.
+
+    ``saved``: start ids of jobs with a G-code copy in the folder; ``printer``:
+    file names on the printer, or None while it does not answer.
+    """
+    coordinator = _coordinator(hass, msg["entity_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Not a Creality printer entity")
+        return
+    printer = None
+    if coordinator.client.connected:
+        try:
+            printer = [entry["name"] for entry in await coordinator.gcode.files.async_list()]
+        except (ConnectionError, TimeoutError):
+            printer = None
+    connection.send_result(msg["id"], {"saved": await coordinator.gcode.async_saved_jobs(), "printer": printer})
+
+
+_PRINT_AGAIN_ERRORS = {
+    "offline": "The printer is not connected.",
+    "busy": "The printer is busy with another job.",
+    "no_gcode": "The G-code of this print is neither on the printer nor saved in the folder.",
+    "upload_failed": "Couldn't copy the saved G-code to the printer.",
+}
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/print_again",
+        vol.Required("entity_id"): str,
+        vol.Optional("print_start_time"): vol.Any(None, vol.Coerce(int)),
+        vol.Optional("file"): vol.Any(None, str),
+    }
+)
+@websocket_api.async_response
+async def ws_print_again(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Start a saved print again (from the printer's file or the folder copy)."""
+    coordinator = _coordinator(hass, msg["entity_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Not a Creality printer entity")
+        return
+    try:
+        result = await coordinator.gcode.async_print_again(msg.get("print_start_time"), msg.get("file"))
+    except PrintAgainError as err:
+        reason = err.args[0]
+        detail = f" ({err.args[1]})" if len(err.args) > 1 else ""
+        connection.send_error(msg["id"], reason, _PRINT_AGAIN_ERRORS.get(reason, reason) + detail)
+        return
+    except (OSError, HomeAssistantError) as err:
+        connection.send_error(msg["id"], "failed", str(err) or type(err).__name__)
+        return
+    connection.send_result(msg["id"], result)

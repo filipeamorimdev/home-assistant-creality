@@ -1,6 +1,6 @@
 # Setup and reference guide
 
-Full setup and feature reference for the **Creality KE Firmware** integration. For an overview, see the [README](../README.md).
+Full setup and feature reference for the Creality integration (listed in Home Assistant as **Creality KE Firmware**). It runs on Creality's stock LAN firmware with no root, Moonraker or cloud. It is tested on the Ender 3 V3 KE; other models are untested but may work, see [Supported printers](../README.md#supported-printers). For an overview, see the [README](../README.md).
 
 ## Contents
 
@@ -9,6 +9,7 @@ Full setup and feature reference for the **Creality KE Firmware** integration. F
 - [Entities](#entities)
 - [Integration options](#integration-options)
 - [The Creality card](#the-creality-card)
+- [The compact card](#the-compact-card)
 - [Camera](#camera)
 - [Current print preview and layer overlay](#current-print-preview-and-layer-overlay)
 - [G-code print profile](#g-code-print-profile)
@@ -33,7 +34,6 @@ The card is delivered from `custom_components/creality/frontend/creality-card.js
 **Monitoring**
 
 - Print status, progress, current file, working / total layers (latched, so they survive the printer resetting them after a finish), job time and Creality's time left
-- Optional **own time estimate** (switch, off by default): the print time and finish time estimated when the job starts, fixed for the whole print
 - Nozzle and bed temperatures, print speed, used material, filament status
 - Toolhead position, live toolhead speed and extrusion flow (disabled by default)
 - Lifetime totals from the printer: jobs, print time, filament used
@@ -66,11 +66,12 @@ The card is delivered from `custom_components/creality/frontend/creality-card.js
 **Command center**
 
 - Bundled `custom:creality-card`, the dashboard command center, with a visual editor that discovers this integration's entities automatically
+- Bundled `custom:creality-compact-card` for overview dashboards: camera preview, G-code view, status, layers, ETA and power in a small tile
 - Layout that adapts to the configured entities and to phone widths; camera status bar with print actions, and a large camera popup with snapshot and fullscreen
 - Completion / stopped banner, printer error and warning banner, temperature history chart
 - Optional printer power switch: compact offline view with a "Turn on printer" button
 
-**Not yet supported:** G-code upload / start print (`opGcodeFile`) — planned for v1.1. Until then, start jobs from your slicer (Creality Print, OrcaSlicer, …) or the printer's screen.
+**Starting prints:** a saved print can be started again from Print history (see [Print again](#print-again)); new jobs still start from your slicer (Creality Print, OrcaSlicer, …) or the printer's screen.
 
 ## Entities
 
@@ -83,7 +84,6 @@ IDs below use an example device named *Ender 3 V3 KE*; yours follow your device 
 | `sensor.*_current_object` | Current file name |
 | `sensor.*_working_layer` / `*_total_layers` | Latched while printing / paused |
 | `sensor.*_print_job_time` / `*_print_time_left` | From the printer |
-| `sensor.*_estimated_print_time` | Whole-job print time estimated at the start, attribute `expected_finish`; unavailable while **Own time estimate** is off (older installs keep the ID `*_print_time_left_estimated`) |
 | `sensor.*_used_material_length` / `*_filament_status` | |
 | `sensor.*_nozzle_temperature` / `*_bed_temperature` | |
 | `sensor.*_print_speed` | Speed setting |
@@ -101,7 +101,6 @@ IDs below use an example device named *Ender 3 V3 KE*; yours follow your device 
 | `number.*_flow_multiplier` | Extrusion flow multiplier |
 | `fan.*_model_fan` / `*_case_fan` / `*_side_fan` | |
 | `light.*_light` | Chamber LED (`lightSw`) |
-| `switch.*_own_time_estimate` | Enables the integration estimate (configuration, default off) |
 | `camera.*_printer_camera` | See [Camera](#camera) |
 | `image.*_current_print_preview` | See [Current print preview](#current-print-preview-and-layer-overlay) |
 
@@ -143,7 +142,7 @@ Anything whose entity is not selected in the editor is hidden and the remaining 
 
 ![Card during a print](images/card-printing.png)
 
-*Running job: camera with pause / stop on the status bar, the G-code silhouette filled up to layer 8 of 35, the printer's thumbnail, time left and finish time, the three time estimates (real, Creality, ours) and the energy used so far with the power offset removed.*
+*Running job: camera with pause / stop on the status bar, the G-code silhouette filled up to layer 8 of 35, the printer's thumbnail, time left and finish time, the real job time and Creality's time left and the energy used so far with the power offset removed.*
 
 ![Card with the printer on and no job running](images/card-idle.png)
 
@@ -193,7 +192,6 @@ layer: sensor.ender_3_v3_ke_working_layer
 total_layers: sensor.ender_3_v3_ke_total_layers
 job_time: sensor.ender_3_v3_ke_print_job_time
 time_left: sensor.ender_3_v3_ke_print_time_left
-time_left_estimated: sensor.ender_3_v3_ke_estimated_print_time
 used_material: sensor.ender_3_v3_ke_used_material_length
 filament: sensor.ender_3_v3_ke_filament_status
 home: button.ender_3_v3_ke_home_xy_then_z
@@ -215,6 +213,60 @@ bed: sensor.ender_3_v3_ke_bed_temperature
 bed_target: number.ender_3_v3_ke_bed_target
 ```
 
+## The compact card
+
+**Creality Printer (compact)** (`custom:creality-compact-card`) fits a printer in
+half a dashboard section. Add it from the card picker; like the full card it
+pre-fills the entities of one printer, and the editor groups the rest under
+Print, Power and Print actions.
+
+- **Header:** title and the print status badge (`Printing`, `Paused`, `Idle`,
+  `Completed`, `Error`, `Offline`, …).
+- **Media row:** a small live camera preview with an enlarge button (the same
+  popup as the full card: snapshot, fullscreen and a status / progress / layer /
+  ETA line; clicking the preview opens it too) and the G-code silhouette, filled
+  up to the current layer (click to switch front / side). While the silhouette
+  is not available the printer's thumbnail (`preview`) stands in.
+- **Job line:** file name, progress percentage and bar, and Pause / Resume /
+  Stop when they apply.
+- **Stats:** layer (current / total), ETA with the time left, elapsed time
+  and power.
+- **Banners:** printer errors / warnings and filament runout, as one-line
+  versions of the full card's banners (a warning dismissed on either card stays
+  dismissed on both).
+
+With no job running, the job line and the layer, ETA and elapsed stats are
+hidden (power stays) and the G-code tile reads "No printing job running". Anything whose
+entity is not configured is left out. With a `printer_switch`, a powered-off or
+disconnected printer shows the offline notice and **Turn on printer** button.
+
+**Power** uses the same `print_energy` key as the full card. For a power sensor
+(W or kW) the card shows the printer's share: the reading minus the **Power
+offset** set on the full card, or else minus the meter's reading just before the
+printer was last switched on (refreshed every 5 minutes). With a dedicated smart
+plug that is simply its reading; hover the value to see the meter reading and
+offset. An energy counter (Wh / kWh) has no live power, so its total is shown.
+
+```yaml
+type: custom:creality-compact-card
+title: Ender 3 V3 KE
+status: sensor.ender_3_v3_ke_print_status
+camera: camera.ender_3_v3_ke_printer_camera
+preview: image.ender_3_v3_ke_current_print_preview
+progress: sensor.ender_3_v3_ke_print_progress
+object: sensor.ender_3_v3_ke_current_object
+layer: sensor.ender_3_v3_ke_working_layer
+total_layers: sensor.ender_3_v3_ke_total_layers
+job_time: sensor.ender_3_v3_ke_print_job_time
+time_left: sensor.ender_3_v3_ke_print_time_left
+filament: sensor.ender_3_v3_ke_filament_status
+print_energy: sensor.printer_plug_power
+printer_switch: switch.printer_plug
+pause: button.ender_3_v3_ke_pause_print
+resume: button.ender_3_v3_ke_resume_print
+stop: button.ender_3_v3_ke_stop_print
+```
+
 ## Camera
 
 | Mode | Behavior |
@@ -226,17 +278,36 @@ bed_target: number.ender_3_v3_ke_bed_target
 
 Missing camera never blocks setup.
 
-### WebRTC printers (K1C / K2 / newer firmware)
+### MJPEG (the KE)
+
+In `mjpeg` mode, and in `auto` mode on printers that don't report WebRTC
+support, Home Assistant opens the printer's `:8080/?action=stream` and relays
+it. The browser only talks to Home Assistant, so the camera also works from
+outside your LAN. Each open view (card tile, popup, another browser) opens its
+own connection to the printer. Snapshots come from `:8080/?action=snapshot`.
+
+### WebRTC printers (e.g. K1C / K2 on newer firmware, untested)
 
 Printers that report `webrtcSupport` (or cameras set to `webrtc`) expose the
 go2rtc source `webrtc:http://<printer>:8000/call/webrtc_local#format=creality`.
 Home Assistant's built-in **go2rtc** integration (part of `default_config`)
 negotiates WebRTC with the printer and serves live video and snapshots; no
-extra add-on is needed. It requires go2rtc 1.9.10 or newer (HA 2026.2 ships
+extra add-on is needed on Home Assistant OS or Container, which include the
+go2rtc binary. **Home Assistant Core** installs don't bundle go2rtc: install a
+go2rtc binary yourself and set up the go2rtc integration, as described in Home
+Assistant's go2rtc documentation. It requires go2rtc 1.9.10 or newer (HA 2026.2 ships
 1.9.14). Without go2rtc the camera does not advertise streaming and falls back
 to `:8080/?action=snapshot` stills where the printer offers them. The bundled
 card shows streaming cameras with Home Assistant's own live camera view and
 keeps the lightweight proxied MJPEG image for MJPEG printers such as the KE.
+
+### Using another camera
+
+The card's **Camera** option accepts any Home Assistant camera entity, not only
+this integration's, for example a webcam or IP camera pointed at the printer.
+Cameras that support streaming use Home Assistant's live camera view; others
+are shown through Home Assistant's camera proxy. To use a different stream for
+the integration's own camera entity, set camera mode `custom` with its URL.
 
 ## Current print preview and layer overlay
 
@@ -304,8 +375,19 @@ without reconnecting to the printer.
 *The folder suggestions are your media folders, their subfolders (mounted shares) and allowlisted folders.*
 
 Automatic saving waits after a job finishes (or is stopped) until the printer
-lists its timelapse (up to 30 minutes). Files are named
-`<start time>_<G-code name>.mp4`.
+lists its timelapse (up to 30 minutes). The folder is organised as:
+
+```text
+<folder>/
+  timelapses/
+    20261026/
+      1511 - Shiny A_PETG_2h57m.mp4     ← local start date and time, G-code name
+  gcode-files/
+    Shiny A_PETG_2h57m.gcode            ← kept to print the job again
+```
+
+Videos saved by older versions directly in the folder
+(`<YYYY-MM-DD_HHMMSS>_<name>.mp4`) are still found and played; they are not moved.
 
 To save to a NAS, add the share under Settings → System → Storage → **Add
 network storage** with usage **Media**; it is mounted at `/media/<name>`, so
@@ -320,27 +402,40 @@ Folders outside `/media` must be listed in
 - Only jobs that end while the option is on are saved; older videos on the
   printer are not copied.
 - The card only reports a copy while the file is really in the folder (looked
-  up by the recorded name, else by its `<start time>_` prefix); a deleted or
+  up by the recorded path, else by the job's date and start time); a deleted or
   moved file is no longer offered.
 - The diagnostic sensor **Timelapse saving** (`off`, `idle`, `waiting`,
-  `saving`, `saved`, `failed`) carries `folder`, `auto_save`, `last_file`, `last_saved`, `last_error` and
-  `pending`, e.g. for a notification automation.
+  `saving`, `saved`, `failed`) carries `folder`, `auto_save`, `last_file`, `last_saved`, `last_error`,
+  `pending`, `gcode_files` (jobs with a saved G-code) and `gcode_last_error`, e.g. for a notification automation.
+
+### Saving G-code
+
+With a folder set, every job that finishes or is stopped also has its G-code
+copied to `gcode-files/` (whether or not timelapses are saved automatically),
+from the same printer endpoint the G-code profile uses. Each content is kept
+once: printing the same file again reuses the copy, and a file re-sliced under
+the same name is kept next to it as `<name> (2).gcode`. Failed copies are
+retried every 5 minutes for up to 24 hours; USB prints have no copy.
 
 ## Print energy
 
 Pick the smart plug's power (W/kW) or cumulative energy (Wh/kWh/MWh) sensor as
 **Power or energy sensor** in the card's Power / energy settings. The card reads
-that sensor's recorder history from the print's start (printer
-`printStartTime`) to its finish and integrates it, so no browser needs to stay
-open during the print. The sensor must be recorded by HA's recorder; gaps or
+that sensor's recorder history from the print's start to its finish and
+integrates it, so no browser needs to stay open during the print. The start is
+the printer's `printStartTime`, or earlier when the print status already showed
+the job as active before it (preparing, heating; up to 30 minutes). The sensor must be recorded by HA's recorder; gaps or
 `unavailable` readings mark the total partial.
 
 A whole-room power meter also counts everything else in the room, so the card
 subtracts a **power offset** from each reading. It takes the meter value at the
 moment the printer was switched on (the Printer power switch's last off→on, up
 to 48 h before the print) as the offset, or, without a switch, 2 minutes
-before print status last left `offline`. Readings below the offset count as
-zero. The offset is shown with the total and saved with the print; if no
+before print status last left `offline`. Only an off period of at least 5
+minutes counts as the printer being switched on: a Home Assistant restart or a
+Wi-Fi drop also shows the printer `offline` for a moment, and a quick plug
+toggle can leave the plug's old reading in place, which would otherwise make
+the printer's own draw the offset. Readings below the offset count as zero. The offset is shown with the total and saved with the print; if no
 power-on is found, the full meter reading is used and labelled as such. Load that
 changes in the room during the print is still counted. Offsets apply to power
 (W/kW) sensors only, not cumulative energy counters.
@@ -353,7 +448,8 @@ Clear the field to go back to the automatic offset.
 
 ## Print history
 
-**Save to history** in the completion banner stores the print with its file,
+**Save to history** in the completion banner opens the **Save print** form, full
+screen, and stores the print with its file,
 duration, layers, material, energy (with measurement quality and baseline,
 correctable by hand), costs from your material price and electricity tariff,
 and the thumbnail. History is kept per printer in Home Assistant's frontend
@@ -362,29 +458,43 @@ stored copy, so several browsers can save without overwriting each other.
 
 ![Save print dialog](images/save-print.png)
 
-*The **Save print** form, pre-filled from the finished job. Every field can be corrected. Prices per kWh and per kg are remembered for the next print (the price per kg for each filament type), and the estimated weight and costs update as you type.*
+*The **Save print** form, pre-filled from the finished job. Every field can be corrected. The filament type is taken from the file name when it names one (Creality Print names files `<model>_<material>_<time>.gcode`, e.g. `PETG`, `PLA-CF`), else the last type used; editing a saved print keeps the type chosen then. Prices per kWh and per kg are remembered for the next print (the price per kg for each filament type), and the estimated weight and costs update as you type.*
 
 ![Print details dialog](images/print-details.png)
 
-*Click a saved print in **Print history** to open its details: thumbnail, result, time, layers, filament, energy and every cost. **Edit** reopens the form to correct it.*
+*Click a saved print in **Print history** to open its details, full screen: thumbnail, result, time, layers, filament, energy and every cost. **Edit** reopens the form to correct it. Close with ×, **Close** or Escape.*
 
 The details also show the job's **timelapse** with **Play** and **Download**:
 the copy in your timelapse folder when there is one (also while the printer is
 off), otherwise the printer's while it still has it (it keeps roughly the last
 50). Very short prints have no timelapse; the printer skips them.
 
+### Print again
+
+Rows whose G-code is available show a **Print again** button (printer icon next to the
+delete button): the job has a copy in `gcode-files/`, or the printer still has
+the file. It is disabled while a job runs or the printer is offline, and asks
+before starting (clear the build plate first).
+
+- If the printer still has a file with that name and the same size as the
+  saved copy, that file is started.
+- Otherwise the saved copy is uploaded to the printer (spaces in the name
+  become `_`), checked in the printer's file list, then started. A different
+  file with the same name on the printer is never replaced: the copy is
+  uploaded as `<name>_<job id>.gcode`.
+- Without a saved copy, a row can only be printed again while the printer
+  still has the file.
+
 ## Time estimates
 
-The card shows the real job time and Creality's own time left; the time left
-and finish clock next to the percentage follow the printer's estimate. Turning
-on the **Own time estimate** switch adds the integration's estimate ("Ours" in
-the card): the whole print time and the finish time it predicts, worked out
-once when the job starts and not updated during the print, so you can compare
-it with how the print actually goes. It uses the slicer's time hint from the
-file name, or else the printer's first time-left report. It stays on the card
-after the print completes, and it is kept across Home Assistant restarts.
-Pauses are not added to the finish time. While the switch is off, the
-estimate sensor is unavailable and the card hides it.
+The cards show the real job time and Creality's own time left; the time left
+and finish clock (ETA) follow the printer's estimate and update as the print
+runs. Pauses are not added to the finish time.
+
+Earlier versions also had an integration estimate ("Ours" on the card, the
+**Own time estimate** switch and the estimated print time sensor). It was
+removed; on upgrade the integration deletes both entities from the entity
+registry. Remove `time_left_estimated` from saved card YAML; the card ignores it.
 
 ## Availability and command errors
 
@@ -416,7 +526,9 @@ An unchanged scrape leaves the file untouched.
 
 ## Limitations
 
-- No G-code upload or starting prints yet (planned for v1.1).
+- Only the Ender 3 V3 KE is tested. The same entities are created for every model, so controls for hardware a printer lacks (for example a side fan or chamber light) may appear.
+- Jobs can only be started again from Print history; sending a new G-code from Home Assistant is not supported (use your slicer).
+- **Print again** uses the printer's start command (`opGcodeFile`) and, for files no longer on the printer, the upload endpoint slicers use (`POST /upload/<name>`). These are taken from protocol notes and slicer integrations, not confirmed on every model and firmware; a failed upload is reported and nothing is started.
 - The thumbnail layer overlay is an approximation; saved thumbnails have no overlay.
 - G-code profiles need the printer's download endpoint and are not available for USB prints.
 - Energy downtime is not reconstructed; gaps mark totals partial.

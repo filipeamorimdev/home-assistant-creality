@@ -1,4 +1,10 @@
-"""Copy each finished job's timelapse from the printer into a folder (e.g. a NAS mount)."""
+"""Copy each finished job's timelapse from the printer into a folder (e.g. a NAS mount).
+
+Videos go to ``<folder>/timelapses/<YYYYMMDD>/<HHMM> - <G-code name>.mp4`` (local
+job start time); G-code copies sit next to them in ``gcode-files`` (see
+``gcode_archive``). Copies saved by older versions directly in the folder are
+still found.
+"""
 
 from __future__ import annotations
 
@@ -34,6 +40,8 @@ _TIMEOUT = aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
 # Characters SMB/NTFS shares reject, plus control characters.
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
+TIMELAPSE_DIR = "timelapses"
+
 # "off": no folder configured.
 STATUSES = ["off", "idle", "waiting", "saving", "saved", "failed"]
 MAX_SUGGESTIONS = 50
@@ -43,39 +51,65 @@ def archive_store_key(entry_id: str) -> str:
     return f"{DOMAIN}.{entry_id}.timelapse_archive"
 
 
+def safe_stem(name: Any) -> str:
+    """File stem without characters network shares reject."""
+    return _UNSAFE.sub("_", PurePosixPath(str(name or "")).stem).strip(" .")[:150]
+
+
+def _local_start(start: int):
+    return dt_util.as_local(dt_util.utc_from_timestamp(start))
+
+
 def archive_name(entry: dict[str, Any]) -> str:
-    """``<local start time>_<gcode stem>.mp4``: sortable and unique per job."""
-    start = _start_id(entry.get("id")) or 0
-    stamp = dt_util.as_local(dt_util.utc_from_timestamp(start)).strftime("%Y-%m-%d_%H%M%S")
-    stem = _UNSAFE.sub("_", PurePosixPath(str(entry.get("gcodename") or "")).stem).strip(" .")[:150]
-    return f"{stamp}_{stem}.mp4" if stem else f"{stamp}.mp4"
+    """``timelapses/<YYYYMMDD>/<HHMM> - <gcode stem>.mp4`` (local job start), relative to the folder."""
+    local = _local_start(_start_id(entry.get("id")) or 0)
+    stem = safe_stem(entry.get("gcodename"))
+    name = f"{local:%H%M} - {stem}.mp4" if stem else f"{local:%H%M}.mp4"
+    return os.path.join(TIMELAPSE_DIR, f"{local:%Y%m%d}", name)
+
+
+def legacy_archive_stamp(start: int) -> str:
+    """``<YYYY-MM-DD_HHMMSS>`` prefix of copies saved directly in the folder by older versions."""
+    return f"{_local_start(start):%Y-%m-%d_%H%M%S}"
+
+
+def _matching(folder: str, prefix: str, bare: str) -> list[str]:
+    """``.mp4`` names in ``folder`` that are ``bare`` or start with ``prefix``."""
+    try:
+        with os.scandir(folder) as entries:
+            return sorted(e.name for e in entries if e.name == bare or (e.name.startswith(prefix) and e.name.endswith(".mp4")))
+    except OSError:
+        return []
 
 
 def find_saved(folder: str | None, recorded: str | None, start_time: Any) -> str | None:
     """Path of a job's copy in ``folder`` if it is (still) there. Run in the executor.
 
-    Tries the name the archive recorded, then any ``<local start>[_<stem>].mp4``
+    Tries the path the archive recorded, then ``timelapses/<day>/<HHMM>[ - <stem>].mp4``
+    and older copies named ``<YYYY-MM-DD_HHMMSS>[_<stem>].mp4`` in the folder itself
     (manual saves, records dropped or lost).
     """
     start = _start_id(start_time)
     if not folder or start is None:
         return None
-    names = [recorded] if recorded else []
-    stamp = archive_name({"id": start})[:-4]
-    if not (recorded and os.path.isfile(os.path.join(folder, recorded))):
-        try:
-            with os.scandir(folder) as entries:
-                names.extend(sorted(
-                    e.name for e in entries
-                    if e.name == f"{stamp}.mp4" or (e.name.startswith(f"{stamp}_") and e.name.endswith(".mp4"))
-                ))
-        except OSError:
-            return None
-    for name in names:
-        path = os.path.join(folder, name)
-        if os.path.isfile(path):
-            return path
-    return None
+    if recorded and os.path.isfile(path := os.path.join(folder, recorded)):
+        return path
+    day_dir = os.path.dirname(os.path.join(folder, archive_name({"id": start})))
+    hhmm = f"{_local_start(start):%H%M}"
+    stamp = legacy_archive_stamp(start)
+    candidates = [os.path.join(day_dir, name) for name in _matching(day_dir, f"{hhmm} - ", f"{hhmm}.mp4")]
+    candidates += [os.path.join(folder, name) for name in _matching(folder, f"{stamp}_", f"{stamp}.mp4")]
+    return next((path for path in candidates if os.path.isfile(path)), None)
+
+
+def free_path(path: str) -> str:
+    """``path``, or ``<stem> (2)<ext>``, ``(3)``… when a file is already there. Run in the executor."""
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(path):
+        path = f"{stem} ({n}){ext}"
+        n += 1
+    return path
 
 
 def check_folder(hass: HomeAssistant, raw: str | None) -> tuple[str, str | None]:
@@ -294,7 +328,7 @@ class TimelapseArchiver:
     @callback
     def _record(self, key: str, path: str) -> None:
         self.pending.pop(key, None)
-        self.saved[key] = os.path.basename(path)
+        self.saved[key] = os.path.relpath(path, self.folder)
         while len(self.saved) > KEEP_SAVED:
             self.saved.pop(next(iter(self.saved)))
         self.last_file, self.last_saved = path, time.time()
@@ -352,17 +386,24 @@ class TimelapseArchiver:
         return delay
 
     async def _save(self, video: dict[str, Any]) -> str:
-        """Stream the video into ``<name>.part``, then rename it into place."""
+        """Stream the video into ``<name>.part``, then rename it into place.
+
+        Saving a job again replaces its earlier copy; another job's video with the
+        same name (same minute and file) gets a numbered name instead.
+        """
         assert self.folder
+        run = self.hass.async_add_executor_job
         final = os.path.join(self.folder, archive_name(video))
+        previous = self.saved.get(str(_start_id(video.get("id"))))
+        if not (previous and os.path.join(self.folder, previous) == final):
+            final = await run(free_path, final)
         part = f"{final}.part"
         url = VIDEO_URL.format(host=self.coordinator.host, name=video["videoname"])
         session = async_get_clientsession(self.hass)
-        run = self.hass.async_add_executor_job
         async with session.get(url, timeout=_TIMEOUT, allow_redirects=False) as response:
             if response.status != 200:
                 raise ValueError(f"printer answered HTTP {response.status}")
-            await run(os.makedirs, self.folder, 0o777, True)
+            await run(os.makedirs, os.path.dirname(final), 0o777, True)
             handle = await run(open, part, "wb")
             total = 0
             try:

@@ -8,61 +8,44 @@ globalThis.HTMLElement = class {};
 globalThis.customElements = {
   whenDefined: async () => {},
   get: () => undefined,
-  define: (_, cls) => { Card = cls; },
+  define: (name, cls) => { if (name === 'creality-card') Card = cls; },
 };
 globalThis.window = {};
 const source = fs.readFileSync(new URL('../custom_components/creality/frontend/creality-card.js', import.meta.url));
 await import(`data:text/javascript;base64,${source.toString('base64')}`);
 
-const FINISH = '2026-10-13T14:20:00Z';
-
-function timings(status, ours, cfg = { time_left_estimated: 'sensor.ours' }) {
+function timings(status) {
   const card = Object.create(Card.prototype);
-  const nodes = { 'time-real': {}, 'time-creality': {}, 'time-ours': {}, 'timing-ours': { hidden: false } };
+  const nodes = { 'progress-eta': {}, 'time-real': {}, 'time-creality': {} };
   card._root = { getElementById: id => nodes[id] };
-  card._cfg = { job_time: 'sensor.job', time_left: 'sensor.left', ...cfg };
+  card._cfg = { job_time: 'sensor.job', time_left: 'sensor.left' };
   card._hass = { states: {
     'sensor.job': { state: '3600', attributes: {} },
     'sensor.left': { state: '1200', attributes: {} },
-    ...(ours === undefined ? {} : { 'sensor.ours': { state: ours, attributes: { expected_finish: FINISH } } }),
-  } };
-  card._hass.locale = { language: 'en', time_format: '24' };
+  }, locale: { language: 'en', time_format: '24' } };
   card._syncTimings(status);
   return nodes;
 }
 
-test('own estimate shows the initial print time and its finish clock', () => {
-  const clock = new Date(FINISH).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: false });
-  const nodes = timings('printing', '1500');
-  assert.equal(nodes['timing-ours'].hidden, false);
-  assert.equal(nodes['time-ours'].textContent, `25:00 · ETA ${clock}`);
-  assert.notEqual(nodes['time-creality'].textContent, '—');
-  // Kept on the finished job for comparison with the real time.
-  assert.equal(timings('completed', '1500')['time-ours'].textContent, `25:00 · ETA ${clock}`);
-  assert.equal(timings('idle', '1500')['time-ours'].textContent, '—');
+test('timing boxes show the real job time and the printer time left', () => {
+  let nodes = timings('printing');
+  assert.equal(nodes['time-real'].textContent, '1:00:00');
+  assert.equal(nodes['time-creality'].textContent, '20:00');
+  nodes = timings('completed');
+  assert.equal(nodes['time-real'].textContent, '1:00:00');
+  assert.equal(nodes['time-creality'].textContent, '0s');
+  // No time left without a running job.
+  assert.equal(timings('idle')['time-creality'].textContent, '—');
 });
 
-test('switch off (sensor unavailable) hides own estimate, keeps real and Creality', () => {
-  const nodes = timings('printing', 'unavailable');
-  assert.equal(nodes['timing-ours'].hidden, true);
-  assert.notEqual(nodes['time-real'].textContent, '—');
-  assert.notEqual(nodes['time-creality'].textContent, '—');
-});
-
-test('missing or unconfigured estimate sensor hides own estimate', () => {
-  assert.equal(timings('printing', undefined)['timing-ours'].hidden, true);
-  assert.equal(timings('printing', '1500', {})['timing-ours'].hidden, true);
-});
-
-test('progress header shows the printer time left and finish clock, not the fixed estimate', () => {
+test('progress header shows the printer time left and finish clock', () => {
   const card = Object.create(Card.prototype);
-  const nodes = { 'progress-eta': {}, 'timing-ours': {} };
+  const nodes = { 'progress-eta': {} };
   card._root = { getElementById: id => nodes[id] };
-  card._cfg = { job_time: 'sensor.job', time_left: 'sensor.left', time_left_estimated: 'sensor.ours' };
+  card._cfg = { job_time: 'sensor.job', time_left: 'sensor.left' };
   card._hass = { states: {
     'sensor.job': { state: '3600', attributes: {} },
     'sensor.left': { state: '1200', attributes: {} },
-    'sensor.ours': { state: '1500', attributes: {} },
   } };
   card._syncTimings('printing');
   assert.match(nodes['progress-eta'].textContent, /^20:00 left · ETA \d/);

@@ -9,3 +9,4 @@ venv/
 .vscode/
 *.swp
 AGENTS.md
+.claude/
