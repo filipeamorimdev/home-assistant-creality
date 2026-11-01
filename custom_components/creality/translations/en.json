@@ -11,7 +11,7 @@
           "timelapse_auto_save": "Save each print's timelapse automatically"
         },
         "data_description": {
-          "timelapse_folder": "Optional. Where timelapse videos (timelapses/<date>/) and each print's G-code (gcode-files/, to print it again from the card) are saved. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
+          "timelapse_folder": "Optional. Where timelapse videos (timelapses/YYYYMMDD/) and each print's G-code (gcode-files/, to print it again from the card) are saved. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
           "timelapse_auto_save": "Copy the video into the folder when a print finishes or is stopped. Needs a folder."
         }
       }
@@ -44,7 +44,7 @@
           "timelapse_auto_save": "Save each print's timelapse automatically"
         },
         "data_description": {
-          "timelapse_folder": "Optional. Where timelapse videos (timelapses/<date>/) and each print's G-code (gcode-files/, to print it again from the card) are saved. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
+          "timelapse_folder": "Optional. Where timelapse videos (timelapses/YYYYMMDD/) and each print's G-code (gcode-files/, to print it again from the card) are saved. Add a NAS share under Settings → System → Storage (usage \"Media\") and use /media/ followed by the share name. Can also be changed from the Creality card.",
           "timelapse_auto_save": "Copy the video into the folder when a print finishes or is stopped. Needs a folder."
         }
       }
