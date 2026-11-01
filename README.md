@@ -28,7 +28,7 @@ If you need broader model coverage or CFS support, [ha_creality_ws](https://gith
 
 - **Its own dashboard card.** A bundled command center with live camera, progress, temperatures and controls in one view. It is served by the integration and registered automatically; no separate frontend plugin or manual resource.
 - **A compact card too.** `custom:creality-compact-card` puts a camera preview (tap to enlarge), the G-code view, status, layers, ETA and power in half a dashboard section. See the [guide](docs/guide.md#the-compact-card).
-- **Local only.** Everything runs on your LAN. Creality Cloud is never contacted.
+- **Local only.** Everything runs on your LAN. Creality Cloud is never contacted. See [Privacy](#privacy) for what stays where.
 - **Printer power control.** Link a smart plug and the card switches to a compact offline view with a **Turn on printer** button while the printer is off.
 - **Cost and energy per print.** Pick a power or energy sensor and the card measures each print's energy from recorder history, subtracts the room's baseline for whole-room meters, and saves the print to history with material and electricity costs.
 - **G-code silhouette.** A front or side view of the real object, built from the job's G-code and filled up to the current layer.
@@ -89,6 +89,22 @@ actions:
 
 The `from:` condition matters. Print status is `offline` while the printer is disconnected and during a Home Assistant restart, then shows the printer's current state again once it reports in. A trigger with only `to: completed` would fire again after every restart or reconnect while the printer still reports the last job as finished. The status values are `idle`, `processing`, `printing`, `paused`, `completed`, `stopped`, `error` and `offline`; add `stopped` to `to:` to be told about cancelled jobs too.
 
+## Privacy
+
+The integration is built to keep your printer and your prints on your own network:
+
+- **Only the printer and Home Assistant talk.** Home Assistant connects to the printer's IP on your LAN and nowhere else. There is no Creality account, no cloud relay, no telemetry or analytics, and the bundled cards load no external scripts, fonts or images.
+- **Your data stays in Home Assistant.** Print history (with costs and thumbnails) is stored in your Home Assistant's own user data, falling back to the browser's local storage. Energy figures come from your recorder history. G-code profiles are kept in memory only.
+- **Files go where you put them.** Timelapses and G-code are copied only when you set a folder, and only to that folder (local disk or your own NAS share). Nothing is uploaded anywhere else.
+- **Camera and video go through Home Assistant.** The browser never connects to the printer directly. Camera streams and timelapses are proxied by Home Assistant behind its login; timelapse links are signed and expire after an hour.
+- **Error codes work offline.** The error-code database ships with the integration and is never looked up online at runtime.
+
+A few things are outside the integration's control:
+
+- **The printer itself may still go online.** Stock firmware can talk to Creality Cloud on its own, for example if it was paired with Creality Print or the Creality Cloud app. The integration doesn't need the printer to reach the internet, so if you want it fully offline, block its internet access on your router or put it on an isolated VLAN or IoT network that Home Assistant can still reach.
+- **The LAN link is unencrypted and unauthenticated.** That is how stock firmware works: the WebSocket (`:9999`), HTTP (`:80`) and camera ports accept anyone on the same network. Keep the printer on a network you trust, and don't forward these ports to the internet.
+- **Remote access is up to your Home Assistant setup.** If you reach Home Assistant from outside your home (Nabu Casa, a reverse proxy, a VPN), the card and camera travel the same way as the rest of your dashboard.
+
 ## Documentation
 
 - [Setup and reference guide](docs/guide.md): entities, options, card layout, camera modes, timelapse saving, energy measurement, time estimates and limitations
@@ -99,7 +115,7 @@ The `from:` condition matters. Print status is `offline` while the printer is di
 No. It uses only what the stock firmware serves on your LAN (WebSocket `:9999`, HTTP `:80`, camera `:8080` / `:8000`).
 
 **Does it use Creality Cloud or need an account?**
-No. Everything stays on your network.
+No. Everything stays on your network. The printer's own firmware may still reach Creality Cloud by itself; see [Privacy](#privacy) for how to keep it offline.
 
 **Which printers work?**
 The Ender 3 V3 KE is tested; K1-series, K2-series and other printers on Creality's stock LAN firmware are untested but may work. See [Supported printers](#supported-printers).
