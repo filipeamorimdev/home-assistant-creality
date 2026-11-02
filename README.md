@@ -49,7 +49,7 @@ Setup checks WebSocket `:9999` and `GET /info`, so a printer that doesn't speak 
 ## Quick start
 
 1. Install the integration, then restart Home Assistant:
-   - **HACS:** HACS → ⋮ → **Custom repositories** → add `https://github.com/filipeamorimdev/home-assistant-creality` with type **Integration**, then open **Creality KE Firmware** and **Download**. Or use this link: [![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=filipeamorimdev&repository=home-assistant-creality&category=integration)
+   - **HACS:** HACS → ⋮ → **Custom repositories** → add `https://github.com/filipeamorimdev/home-assistant-creality` with type **Integration**, then open **Creality Klipper firmware integration** and **Download**. Or use this link: [![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=filipeamorimdev&repository=home-assistant-creality&category=integration)
    - **Manually:** copy `custom_components/creality` into your Home Assistant `config/custom_components/` folder.
 2. Settings → Devices & services → **Add Integration** → **Creality**, and enter the printer's IP address.
 3. Edit a dashboard → **Add card** → **Creality Printer**. The editor finds the printer's entities by itself.

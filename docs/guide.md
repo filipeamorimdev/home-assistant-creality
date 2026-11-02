@@ -1,6 +1,6 @@
 # Setup and reference guide
 
-Full setup and feature reference for the Creality integration (listed in Home Assistant as **Creality KE Firmware**). It runs on Creality's stock LAN firmware with no root, Moonraker or cloud. It is tested on the Ender 3 V3 KE; other models are untested but may work, see [Supported printers](../README.md#supported-printers). For an overview, see the [README](../README.md).
+Full setup and feature reference for the Creality integration (listed in Home Assistant as **Creality Klipper firmware** and in HACS as **Creality Klipper firmware integration**). It runs on Creality's stock LAN firmware with no root, Moonraker or cloud. It is tested on the Ender 3 V3 KE; other models are untested but may work, see [Supported printers](../README.md#supported-printers). For an overview, see the [README](../README.md).
 
 ## Contents
 

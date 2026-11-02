@@ -1,6 +1,6 @@
 {
   "domain": "creality",
-  "name": "Creality KE Firmware",
+  "name": "Creality Klipper firmware",
   "after_dependencies": ["go2rtc"],
   "codeowners": ["@filipeamorimdev"],
   "config_flow": true,
