@@ -742,3 +742,38 @@ test("layer overlay rises, holds while paused, resets per job and only completes
   mount.hidden = true; update();
   assert.equal(overlay.hidden, false, "Overlay returns when the profile tile is hidden");
 });
+
+test("finish time comes from history when an HA restart moved the status's last change", async () => {
+  // The print ended an hour in; HA restarted three hours later (status offline, then completed again).
+  const end = T0 + 3600;
+  const { card, calls } = await meterCard("W", [{ s: "100", lu: T0 - 60 }], { "sensor.status": [
+    { s: "processing", lu: T0 - 120 }, { s: "printing", lu: T0 }, { s: "completed", lu: end },
+    { s: "unavailable", lu: end + 10800 }, { s: "offline", lu: end + 10805 }, { s: "completed", lu: end + 10830 },
+  ] });
+  const restartedAt = (end + 10830) * 1000;
+  const job = { jobKey: "job", startTime: T0, finishedAt: restartedAt, ended: new Date(restartedAt).toISOString() };
+  card._completedJob = job;
+  card._lastJobDraft = { ...job };
+  card._timelapse = { key: "sensor.status|job", since: restartedAt };
+  await card._refineFinishedAt(job);
+  assert.equal(calls[0].entity_ids[0], "sensor.status");
+  assert.equal(card._completedJob.finishedAt, end * 1000);
+  assert.equal(card._completedJob.ended, new Date(end * 1000).toISOString());
+  assert.equal(card._lastJobDraft.finishedAt, end * 1000);
+  assert.equal(card._timelapse.since, end * 1000, "timelapse wait measured from the real finish");
+  // A final measurement up to the restart is redone up to the real finish:
+  // 100 W from the meter's first sample (T0-60 s) to the end.
+  card._meterEnergy = { jobKey: "job", finishedAt: restartedAt, final: true, kwh: 1.4, at: Date.now() };
+  await card._refreshMeterEnergy();
+  assert.ok(Math.abs(card._energyUsedKwh() - (100 * 3660) / 3.6e6) < 1e-9);
+  assert.equal(card._meterEnergy.finishedAt, end * 1000);
+});
+
+test("finish lookup ignores an earlier job's completion and a job with no active history", async () => {
+  // The previous job's "completed" is still in effect at this job's start time.
+  const { card } = await meterCard("W", [], { "sensor.status": [{ s: "completed", lu: T0 - 900 }] });
+  const job = { jobKey: "job", startTime: T0, finishedAt: (T0 + 3600) * 1000 };
+  card._completedJob = job;
+  await card._refineFinishedAt(job);
+  assert.equal(card._completedJob.finishedAt, (T0 + 3600) * 1000, "never moved to the start time");
+});

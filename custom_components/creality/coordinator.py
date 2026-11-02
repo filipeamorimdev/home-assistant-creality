@@ -53,6 +53,18 @@ def job_key(data: dict[str, Any]) -> str | None:
     return f"{fname}|{data.get('printStartTime') or ''}|{data.get('printId') or ''}"
 
 
+def printer_error(data: dict[str, Any]) -> tuple[int, Any]:
+    """``(err.key, err.value)``; ``(0, "")`` when absent or malformed."""
+    err = data.get("err")
+    if not isinstance(err, dict):
+        return 0, ""
+    try:
+        key = int(err.get("key") or 0)
+    except (TypeError, ValueError):
+        key = 0
+    return key, err.get("value")
+
+
 def map_print_status(data: dict[str, Any], terminal_job: str | None = None) -> str:
     """Map telemetry to a human print status string for the card.
 
@@ -60,11 +72,7 @@ def map_print_status(data: dict[str, Any], terminal_job: str | None = None) -> s
     printer that drops back to state 0 afterwards (filename still loaded) is idle,
     not starting a new job.
     """
-    err = data.get("err") or {}
-    try:
-        err_key = int(err.get("key") or 0)
-    except (TypeError, ValueError):
-        err_key = 0
+    err_key = printer_error(data)[0]
 
     try:
         mat = int(data.get("materialStatus") or 0)
@@ -191,10 +199,10 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._fresh.update(frame)
             if self._fresh.get("state") is not None:
                 self._check_reconnect_job()
-        self.profile.observe(self.data)
         self.archive.observe(self.data)
         self.gcode.observe(self.data)
         self._update_terminal_job()
+        self.profile.observe(self.data, idle=map_print_status(self.data, self._terminal_job) == "idle")
         self._update_layer_peaks()
         self._paused = self._compute_paused()
         if not frame.keys() <= _HIGH_RATE_KEYS or time.monotonic() - self._last_publish >= PUBLISH_INTERVAL:
@@ -313,17 +321,13 @@ class CrealityCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             out["__layer"] = layer
             out["__total_layer"] = total
 
-        err = d.get("err") or {}
-        try:
-            key = int(err.get("key") or 0)
-        except (TypeError, ValueError):
-            key = 0
+        key, value = printer_error(d)
         info = lookup_error(key) if key else None
         out["__err_key"] = key
         out["__err_message"] = info.message if info else ("" if key == 0 else f"Error key {key}")
         out["__err_severity"] = info.severity if info else ("unknown" if key else "ok")
         out["__err_solution"] = info.solution if info else ""
-        out["__err_value"] = str(err.get("value") or "") if key else ""
+        out["__err_value"] = str(value or "") if key else ""
         out["__filament_runout"] = False
         try:
             out["__filament_runout"] = int(d.get("materialStatus") or 0) == 1

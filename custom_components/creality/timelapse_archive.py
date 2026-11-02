@@ -239,15 +239,17 @@ class TimelapseArchiver:
 
     @callback
     def observe(self, data: dict[str, Any]) -> None:
-        """Queue the job when the printer reports it finished or stopped."""
-        if not self.auto_save:
-            return
+        """Queue the job when the printer reports it finished or stopped.
+
+        The state is tracked while auto-save is off too: a job that already
+        ended when auto-save is switched on is not taken for one ending now.
+        """
         try:
             state = int(data["state"]) if data.get("state") is not None else None
         except (TypeError, ValueError):
             state = None
         prev, self._last_state = self._last_state, state
-        if state not in (STATE_FINISHED, STATE_STOPPED) or state == prev:
+        if not self.auto_save or state not in (STATE_FINISHED, STATE_STOPPED) or state == prev:
             return
         start = _start_id(data.get("printStartTime"))
         if start is None:
@@ -296,6 +298,10 @@ class TimelapseArchiver:
         delay = None
         try:
             delay = await self._process()
+        except Exception:
+            # An unexpected error must not stop the queue for good.
+            _LOGGER.exception("Timelapse archive pass failed on %s", self.coordinator.host)
+            delay = RETRY_SECONDS
         finally:
             self._store.async_delay_save(self._data, 1)
             self._schedule(delay)

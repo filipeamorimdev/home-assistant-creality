@@ -7,7 +7,7 @@ DOMAIN = "creality"
 # Bundled Lovelace card. Bump CARD_VERSION whenever the frontend changes so
 # Home Assistant browsers receive a fresh URL instead of a cached script.
 CARD_URL = "/creality/creality-card.js"
-CARD_VERSION = "0.1.54"
+CARD_VERSION = "0.1.55"
 
 CONF_HOST = "host"
 CONF_NAME = "name"

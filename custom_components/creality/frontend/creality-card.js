@@ -60,11 +60,12 @@ function isIdleStatus(status) {
 
 const NO_JOB_TEXT = "No printing job running";
 const ACTIVE_STATUSES = ["printing", "paused", "pausing", "resuming", "processing"];
+const TERMINAL_STATUSES = ["completed", "stopped"];
 
 /** Profile tile text while no G-code silhouette is available. */
 function profileEmptyText(jobKey, status) {
   if (!jobKey) return NO_JOB_TEXT;
-  if (status === "loading" || status === undefined) return "Reading G-code…";
+  if (status === "loading" || status === "pending" || status === undefined) return "Reading G-code…";
   if (status === "unavailable") return "No G-code profile for this print";
   if (status === "failed") return "G-code profile failed; retrying";
   return "No G-code profile";
@@ -3154,11 +3155,14 @@ class CrealityCard extends HTMLElement {
     const job = this._meterJob();
     const cached = this._meterEnergy;
     if (!job || this._meterBusy) return;
-    if (cached?.jobKey === job.jobKey && (cached.final || Date.now() - cached.at < 60000)) return;
+    // A finish time corrected from history makes an earlier final measurement stale.
+    if (cached?.jobKey === job.jobKey && cached.finishedAt === job.finishedAt &&
+        (cached.final || Date.now() - cached.at < 60000)) return;
     this._meterBusy = true;
+    const finishedAt = job.finishedAt;
     try {
       const measured = await this._measureMeterEnergy(job);
-      this._meterEnergy = { jobKey: job.jobKey, at: Date.now(), final: Boolean(job.finishedAt),
+      this._meterEnergy = { jobKey: job.jobKey, finishedAt, at: Date.now(), final: Boolean(finishedAt),
         kwh: measured?.kwh ?? null, quality: measured?.quality || "unavailable",
         baselineW: measured?.baselineW };
     } finally {
@@ -3542,7 +3546,7 @@ class CrealityCard extends HTMLElement {
     if (save) save.disabled = !s.can_edit;
     this._drawFolderSuggestions();
     this._setText("tl-settings-note", s.can_edit
-      ? "Pick a share or type a path. Timelapses go to timelapses/<date>/ and each print's G-code to gcode-files/, so it can be printed again from Print history. Network storage added in Settings → System → Storage with usage \"Media\" appears under /media."
+      ? "Pick a share or type a path. Timelapses go to timelapses/YYYYMMDD/ and each print's G-code to gcode-files/, so it can be printed again from Print history. Network storage added in Settings → System → Storage with usage \"Media\" appears under /media."
       : "Only administrators can change these settings.");
   }
 
@@ -3679,6 +3683,7 @@ class CrealityCard extends HTMLElement {
       };
       this._lastJobDraft.timeLabel = fmtDuration(this._lastJobDraft.timeSeconds);
       this._completedJob = { ...this._lastJobDraft };
+      this._finishLookup = this._refineFinishedAt(this._completedJob);
     } else {
       this._lastActiveDraft = { ...this._lastJobDraft };
     }
@@ -3700,6 +3705,44 @@ class CrealityCard extends HTMLElement {
   _terminalAt() {
     const t = Date.parse(this._st("status")?.last_changed);
     return Number.isFinite(t) ? t : Date.now();
+  }
+
+  /**
+   * The status entity's last change is the finish only if nothing happened
+   * since: an HA restart or the printer going offline moves it. Recorder history
+   * knows when the job's status first turned completed/stopped after being
+   * active; use that when it is earlier, and measure energy and the timelapse
+   * wait from it.
+   */
+  async _refineFinishedAt(job) {
+    const id = this._cfg?.status;
+    if (!id || !this._hass?.callWS || !Number.isFinite(job?.finishedAt)) return;
+    const startMs = Number(job.startTime) * 1000;
+    const from = startMs > 1e12 && startMs < job.finishedAt ? startMs : job.finishedAt - 7 * 86400000;
+    let states;
+    try {
+      states = historyStates(await this._fetchHistory(id, from, job.finishedAt + 1000), id);
+    } catch (_err) {
+      return;
+    }
+    let active = false;
+    let at = null;
+    for (const { t, s } of states) {
+      const status = s.toLowerCase();
+      if (ACTIVE_STATUSES.includes(status)) active = true;
+      else if (active && TERMINAL_STATUSES.includes(status)) {
+        at = t;
+        break;
+      }
+    }
+    if (!Number.isFinite(at) || at >= job.finishedAt || this._completedJob?.jobKey !== job.jobKey) return;
+    for (const draft of [this._completedJob, this._lastJobDraft]) {
+      if (draft?.jobKey !== job.jobKey) continue;
+      draft.finishedAt = at;
+      draft.ended = new Date(at).toISOString();
+    }
+    if (this._timelapse && this._timelapse.key === this._timelapseKey()) this._timelapse.since = at;
+    this._trackEnergy();
   }
 
   /** At most one background thumbnail capture per job per minute. */
@@ -4524,7 +4567,8 @@ class CrealityCard extends HTMLElement {
     // Ask again while downloading or racing a job change; failures retry slowly
     // (the integration re-downloads after a few minutes). "unavailable" is final.
     let wait = 0;
-    if (res?.status === "loading" || res?.file !== file) wait = 5000;
+    // "pending": the integration starts the download once the printer leaves idle.
+    if (["loading", "pending"].includes(res?.status) || res?.file !== file) wait = 5000;
     else if (res?.status === "failed") wait = 60000;
     if (!wait) return;
     this._profileTimer = setTimeout(() => {

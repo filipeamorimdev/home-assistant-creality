@@ -1,5 +1,6 @@
 """Coordinator status/layer logic with lightweight HA interface doubles."""
 
+import asyncio
 import importlib
 from pathlib import Path
 import sys
@@ -74,7 +75,7 @@ def make_coordinator(connected=True):
     coord.live = connected
     coord._fresh = None
     coord.client = SimpleNamespace(connected=connected, send_set_retry=AsyncMock())
-    coord.profile = SimpleNamespace(observe=lambda data: None)
+    coord.profile = SimpleNamespace(observe=lambda data, idle=False: None)
     coord.archive = SimpleNamespace(observe=lambda data: None)
     coord.gcode = SimpleNamespace(observe=lambda data: None, files=SimpleNamespace(observe=lambda frame: None))
     coord.timelapse = TIMELAPSE.TimelapseIndex(coord)
@@ -184,6 +185,22 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(coord.data["__err_solution"])
         coord._on_message({"err": {"errcode": 0, "key": 0, "value": ""}})
         self.assertEqual((coord.data["__err_key"], coord.data["__err_value"]), (0, ""))
+
+    def test_malformed_err_is_ignored(self):
+        coord = make_coordinator()
+        for err in ("printer says no", [508], 7, None):
+            coord._on_message({"state": 1, "printFileName": "a.gcode", "err": err})
+            self.assertEqual(coord.data["__print_status"], "printing")
+            self.assertEqual((coord.data["__err_key"], coord.data["__err_severity"]), (0, "ok"))
+
+    def test_profile_download_waits_while_idle_with_last_file_loaded(self):
+        coord = make_coordinator()
+        seen = []
+        coord.profile = SimpleNamespace(observe=lambda data, idle=False: seen.append(idle))
+        coord._on_message({"state": 0, "deviceState": 0, "printFileName": "a.gcode"})
+        coord._on_message({"state": 1, "deviceState": 1})
+        coord._on_message({"state": 2})
+        self.assertEqual(seen, [True, False, False])
 
     def test_offline_status(self):
         coord = make_coordinator(connected=False)
@@ -300,9 +317,94 @@ class TimelapseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await coord.timelapse.async_list()
         coord.client.send_json = AsyncMock()
-        with patch.object(TIMELAPSE, "LIST_TIMEOUT", 0.01), self.assertRaises(TimeoutError):
+        coord.timelapse._reply._timeout = 0.01
+        with self.assertRaises(TimeoutError):
             await coord.timelapse.async_list()
         # The unanswered request is dropped: the next call asks the printer again.
-        with patch.object(TIMELAPSE, "LIST_TIMEOUT", 0.01), self.assertRaises(TimeoutError):
+        with self.assertRaises(TimeoutError):
             await coord.timelapse.async_list()
         self.assertEqual(coord.client.send_json.await_count, 2)
+
+    async def test_timed_out_caller_does_not_cancel_the_others(self):
+        coord = make_coordinator()
+        coord.client.send_json = AsyncMock()
+        coord.timelapse._reply._timeout = 0.05
+        first = asyncio.create_task(coord.timelapse.async_list())
+        await asyncio.sleep(0.03)
+        second = asyncio.create_task(coord.timelapse.async_list())
+        with self.assertRaises(TimeoutError):
+            await first
+        # The second caller still waits on the shared request and gets the answer.
+        await asyncio.sleep(0)
+        self.assertFalse(second.done())
+        coord._on_message({"elapseVideoList": VIDEOS})
+        self.assertEqual(await second, VIDEOS)
+        self.assertEqual(coord.client.send_json.await_count, 1)
+        # Unanswered: every caller times out on its own (TimeoutError, never CancelledError).
+        coord.timelapse._fetched_at = None
+        calls = [asyncio.create_task(coord.timelapse.async_list()) for _ in range(2)]
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        self.assertTrue(all(isinstance(r, TimeoutError) for r in results), results)
+
+    async def test_fresh_file_list_also_answers_the_replaced_request(self):
+        printer_files = MODULE.GcodeArchiver.__init__.__globals__["PrinterFiles"]
+        coord = make_coordinator()
+        coord.client.send_json = AsyncMock()
+        files = printer_files(coord)
+        old = asyncio.create_task(files.async_list())
+        await asyncio.sleep(0)
+        new = asyncio.create_task(files.async_list(fresh=True))
+        await asyncio.sleep(0)
+        files.observe({"retGcodeFileInfo": {"fileInfo": "/usr/data/printer_data/gcodes:a.gcode:10"}})
+        self.assertEqual(await new, [{"dir": "/usr/data/printer_data/gcodes", "name": "a.gcode", "size": 10}])
+        self.assertEqual(await old, await new)
+        self.assertEqual(coord.client.send_json.await_count, 2)
+
+
+class ProfileMonitorTests(unittest.TestCase):
+    def monitor(self):
+        tasks = []
+
+        def create_task(_hass, coro, _name):
+            coro.close()
+            tasks.append(_name)
+            return SimpleNamespace(done=lambda: False, cancel=lambda: None)
+
+        coordinator = SimpleNamespace(hass=None, host="printer",
+                                      entry=SimpleNamespace(async_create_background_task=create_task))
+        return MODULE.ProfileMonitor(coordinator), tasks
+
+    def test_idle_printer_does_not_download_until_active(self):
+        monitor, tasks = self.monitor()
+        job = {"printFileName": "/usr/data/printer_data/gcodes/a.gcode", "printStartTime": 5}
+        monitor.observe(job, idle=True)
+        self.assertEqual((monitor.status, tasks), ("pending", []))
+        monitor.observe(job, idle=True)
+        self.assertEqual(tasks, [])
+        monitor.observe(job, idle=False)
+        self.assertEqual((monitor.status, len(tasks)), ("loading", 1))
+        monitor.observe(job, idle=False)
+        self.assertEqual(len(tasks), 1, "one download per job")
+
+
+class TimelapseArchiveObserveTests(unittest.TestCase):
+    def archiver(self, auto_save):
+        archiver = MODULE.TimelapseArchiver.__new__(MODULE.TimelapseArchiver)
+        archiver.auto_save = auto_save
+        archiver._last_state = None
+        archiver.pending, archiver.saved = {}, {}
+        archiver._store = SimpleNamespace(async_delay_save=lambda *_: None)
+        archiver._set_status = lambda *_: None
+        archiver._kick = lambda: None
+        return archiver
+
+    def test_enabling_auto_save_after_a_job_ended_does_not_queue_it(self):
+        archiver = self.archiver(auto_save=False)
+        finished = {"state": 2, "printStartTime": 5}
+        archiver.observe(finished)
+        archiver.auto_save = True  # Switched on from the card while the printer still shows the job.
+        archiver.observe(finished)
+        self.assertEqual(archiver.pending, {})
+        archiver.observe({"state": 1, "printStartTime": 6})
+        archiver.observe({"state": 2, "printStartTime": 6})
+        self.assertEqual(list(archiver.pending), ["6"])

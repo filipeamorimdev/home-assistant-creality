@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import voluptuous as vol
@@ -45,9 +47,28 @@ STEP_USER = vol.Schema(
 )
 
 
+def normalize_host(raw: str) -> str:
+    """Host name or IP from what was typed: also a pasted URL or ``host:port``.
+
+    IPv6 addresses come back in brackets, ready for ``http://{host}/`` URLs.
+    """
+    text = raw.strip()
+    try:
+        return f"[{ipaddress.IPv6Address(text.strip('[]'))}]"
+    except ValueError:
+        pass
+    try:
+        host = urlsplit(text if "://" in text else f"//{text}").hostname
+    except ValueError:
+        host = None
+    if host and ":" in host:
+        return f"[{host}]"
+    return host or text
+
+
 async def _probe_host(hass: HomeAssistant, host: str) -> dict[str, Any]:
     """Return printer info dict; raise on failure."""
-    host = host.strip().split("/")[0].split(":")[0]
+    host = normalize_host(host)
 
     def _http_info() -> dict[str, Any]:
         url = INFO_URL.format(host=host)

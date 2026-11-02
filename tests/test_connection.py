@@ -88,3 +88,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             await client._handle_raw("ok")
             self.assertEqual(client.last_rx, 100)
         self.assertEqual(messages, [])
+
+    async def test_frame_handler_error_is_logged_and_connection_kept(self):
+        def broken(_frame):
+            raise AttributeError("'str' object has no attribute 'get'")
+
+        client = self.module.CrealityWsClient("printer", broken)
+        with self.assertLogs(self.module._LOGGER, "ERROR") as logs:
+            await client._handle_raw('{"err":"oops"}')  # Must not raise into the session loop.
+        self.assertIn("Error handling frame from printer", logs.output[0])

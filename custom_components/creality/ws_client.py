@@ -231,6 +231,11 @@ class CrealityWsClient:
                 pass
             return
 
-        result = self._on_message(payload)
-        if asyncio.iscoroutine(result):
-            await result
+        # A frame the handler cannot process must not drop the connection: the
+        # printer would resend the same state after the reconnect, in a loop.
+        try:
+            result = self._on_message(payload)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Error handling frame from %s: %.200s", self._host, text)

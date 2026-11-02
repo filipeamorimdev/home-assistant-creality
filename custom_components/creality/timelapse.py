@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 import os
 from pathlib import PurePosixPath
@@ -67,6 +68,51 @@ def download_name(entry: dict[str, Any]) -> str:
     return f"{stem}-timelapse.mp4" if stem else str(entry.get("videoname"))
 
 
+class PrinterReply:
+    """A WS request whose answer arrives later as a telemetry frame.
+
+    Concurrent callers share one request and its answer. A caller that times
+    out gives up alone: the shared future is never cancelled, so the others
+    keep waiting for their own timeout. A request unanswered for ``timeout``
+    seconds (dropped, reconnect) is sent again by the next caller.
+    """
+
+    def __init__(self, send: Callable[[], Awaitable[None]], timeout: float) -> None:
+        self._send = send
+        self._timeout = timeout
+        self._future: asyncio.Future[None] | None = None
+        self._asked_at: float | None = None
+
+    @callback
+    def answered(self) -> None:
+        if self._future and not self._future.done():
+            self._future.set_result(None)
+        self._future = None
+
+    async def async_wait(self, fresh: bool = False) -> None:
+        """Ask (unless a recent request is pending) and wait for the answer.
+
+        ``fresh`` always sends a new request, for an answer the printer can only
+        give after a change (an upload). Raises ConnectionError/TimeoutError.
+        """
+        loop = asyncio.get_running_loop()
+        future = self._future
+        if future is None or future.done() or fresh:
+            future = loop.create_future()
+            if self._future is not None and not self._future.done():
+                # Callers of the replaced request are answered by the new one.
+                future.add_done_callback(lambda _f, old=self._future: old.done() or old.set_result(None))
+            self._future, self._asked_at = future, None
+        if self._asked_at is None or loop.time() - self._asked_at >= self._timeout:
+            self._asked_at = loop.time()
+            try:
+                await self._send()
+            except Exception as err:  # noqa: BLE001 - websockets raises its own hierarchy
+                self._asked_at = None
+                raise ConnectionError(f"Printer request failed: {err}") from err
+        await asyncio.wait_for(asyncio.shield(future), self._timeout)
+
+
 class TimelapseIndex:
     """Per-printer cache of the printer's timelapse list."""
 
@@ -74,7 +120,7 @@ class TimelapseIndex:
         self.coordinator = coordinator
         self.entries: list[dict[str, Any]] = []
         self._fetched_at: float | None = None
-        self._waiter: asyncio.Future[None] | None = None
+        self._reply = PrinterReply(lambda: coordinator.client.send_json(LIST_REQUEST), LIST_TIMEOUT)
 
     @callback
     def observe(self, frame: dict[str, Any]) -> None:
@@ -86,30 +132,13 @@ class TimelapseIndex:
             return
         self.entries = [entry for entry in entries if isinstance(entry, dict)]
         self._fetched_at = time.monotonic()
-        if self._waiter and not self._waiter.done():
-            self._waiter.set_result(None)
+        self._reply.answered()
 
     async def async_list(self) -> list[dict[str, Any]]:
         """Fresh list from the printer; raises ConnectionError/TimeoutError."""
         if self._fetched_at is not None and time.monotonic() - self._fetched_at < LIST_MAX_AGE:
             return self.entries
-        waiter = self._waiter
-        if waiter is None or waiter.done():
-            waiter = self._waiter = asyncio.get_running_loop().create_future()
-            try:
-                await self.coordinator.client.send_json(LIST_REQUEST)
-            except Exception as err:  # noqa: BLE001 - websockets raises its own hierarchy
-                self._waiter = None
-                waiter.cancel()
-                raise ConnectionError(f"Timelapse list request failed: {err}") from err
-        try:
-            await asyncio.wait_for(asyncio.shield(waiter), LIST_TIMEOUT)
-        except TimeoutError:
-            # Unanswered (dropped request, reconnect): the next call asks again.
-            if self._waiter is waiter:
-                self._waiter = None
-                waiter.cancel()
-            raise
+        await self._reply.async_wait()
         return self.entries
 
     async def async_find(self, start_time: Any) -> dict[str, Any] | None:

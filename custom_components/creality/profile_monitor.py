@@ -39,8 +39,9 @@ def gcode_name(print_file: str | None) -> str | None:
 class ProfileMonitor:
     """Per-printer state behind the ``creality/print_profile`` command.
 
-    ``status``: ``no_job`` | ``loading`` | ``ready`` | ``unavailable``
-    (file not served / no extrusion) | ``failed`` (retried later).
+    ``status``: ``no_job`` | ``pending`` (file loaded, printer idle) |
+    ``loading`` | ``ready`` | ``unavailable`` (file not served / no extrusion) |
+    ``failed`` (retried later).
     """
 
     def __init__(self, coordinator) -> None:
@@ -53,7 +54,13 @@ class ProfileMonitor:
         self._retry_at = 0.0
 
     @callback
-    def observe(self, data: dict[str, Any]) -> None:
+    def observe(self, data: dict[str, Any], idle: bool = False) -> None:
+        """Track the loaded job; download its G-code once it is not ``idle``.
+
+        An idle printer keeps the last file loaded, and nothing shows its
+        profile then; the download waits until that job (or another) is active
+        or has just ended.
+        """
         file = str(data.get("printFileName") or "").strip()
         job = (file, str(data.get("printStartTime") or "")) if file else None
         name = gcode_name(file)
@@ -63,7 +70,10 @@ class ProfileMonitor:
             if job is None or name is None:
                 self.status = "no_job" if job is None else "unavailable"
                 return
-        elif self.status != "failed" or time.monotonic() < self._retry_at:
+            self.status = "pending"
+        if idle or self.status not in ("pending", "failed"):
+            return
+        if self.status == "failed" and time.monotonic() < self._retry_at:
             return
         self.status = "loading"
         self._task = self.coordinator.entry.async_create_background_task(

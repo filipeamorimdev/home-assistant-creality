@@ -833,3 +833,54 @@ async def test_print_again_from_printer_file_or_saved_copy(hass, fake_client, fr
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+def test_host_normalized_from_pasted_url_port_and_ipv6():
+    from custom_components.creality.config_flow import normalize_host
+
+    assert normalize_host(" http://192.168.1.5/ ") == "192.168.1.5"
+    assert normalize_host("192.168.1.5:9999") == "192.168.1.5"
+    assert normalize_host("http://K1.lan:80/info") == "k1.lan"
+    assert normalize_host("fe80::1") == "[fe80::1]"
+    assert normalize_host("http://[fe80::1]:80/") == "[fe80::1]"
+    assert normalize_host("10.0.0.24") == "10.0.0.24"
+
+
+async def test_preview_reason_visible_while_no_image(hass, fake_client, frontend_stub, aioclient_mock):
+    from homeassistant.helpers.entity_component import async_update_entity
+
+    aioclient_mock.get("http://10.0.0.24/downloads/original/current_print_image.png", status=404)
+    entry = await setup_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    preview_id = entity_id(hass, "image", entry, "current_print_preview")
+    coordinator._on_message(dict(FRAME))
+    await hass.async_block_till_done()
+    await async_update_entity(hass, preview_id)
+    state = hass.states.get(preview_id)
+    # Available with no image: the reason is readable instead of being dropped with the state.
+    assert state.state == "unknown"
+    assert state.attributes["preview_reason"] == "fetch_failed"
+
+
+async def test_profile_not_downloaded_for_idle_printer(hass, fake_client, frontend_stub, aioclient_mock):
+    from custom_components.creality.websocket import ws_print_profile
+
+    url = "http://10.0.0.24/downloads/gcode/part_PLA_1h30m.gcode"
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(url, content=b"M83\n;LAYER_CHANGE\n;Z:0.2\nG1 X0 Y0\nG1 X10 Y5 E1\n")
+    entry = await setup_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    # Idle with the last job's file still loaded (state 0, device idle).
+    coordinator._on_message({**FRAME, "state": 0, "deviceState": 0})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert aioclient_mock.call_count == 0
+    connection = MagicMock()
+    status_id = entity_id(hass, "sensor", entry, "print_status")
+    ws_print_profile(hass, connection, {"id": 1, "type": "creality/print_profile", "entity_id": status_id})
+    assert connection.send_result.call_args.args[1]["status"] == "pending"
+    # The same job starts printing: now it is downloaded.
+    coordinator._on_message({"state": 1, "deviceState": 1})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert aioclient_mock.call_count == 1
+    ws_print_profile(hass, connection, {"id": 2, "type": "creality/print_profile", "entity_id": status_id})
+    assert connection.send_result.call_args.args[1]["status"] == "ready"

@@ -25,7 +25,12 @@ async def async_setup_entry(
 
 
 class CrealityPrintPreview(CrealityEntity, ImageEntity):
-    """Fetch the fixed current-print PNG verified on the LAN printer."""
+    """Fetch the fixed current-print PNG verified on the LAN printer.
+
+    Available whenever the printer is connected, so ``preview_reason`` stays
+    visible (HA drops the attributes of unavailable entities). Until an image
+    arrives the state is unknown, which the card treats as no thumbnail.
+    """
 
     _attr_translation_key = "current_print_preview"
     _attr_content_type = "image/png"
@@ -40,10 +45,6 @@ class CrealityPrintPreview(CrealityEntity, ImageEntity):
     def should_poll(self) -> bool:
         """Override CoordinatorEntity: the thumbnail has its own HTTP source."""
         return True
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._preview.content is not None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

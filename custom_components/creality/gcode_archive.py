@@ -27,7 +27,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, STATE_FINISHED, STATE_STOPPED
 from .profile_monitor import GCODE_URL, gcode_name
-from .timelapse import _start_id
+from .timelapse import PrinterReply, _start_id
 from .timelapse_archive import free_path, safe_stem
 
 _LOGGER = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ class PrinterFiles:
         self.coordinator = coordinator
         self.files: list[dict[str, Any]] = []
         self._fetched_at: float | None = None
-        self._waiter: asyncio.Future[None] | None = None
+        self._reply = PrinterReply(lambda: coordinator.client.send_json(FILES_REQUEST), LIST_TIMEOUT)
 
     @callback
     def observe(self, frame: dict[str, Any]) -> None:
@@ -110,29 +110,13 @@ class PrinterFiles:
             return
         self.files = parse_file_list(frame.pop(FILES_KEY))
         self._fetched_at = time.monotonic()
-        if self._waiter and not self._waiter.done():
-            self._waiter.set_result(None)
+        self._reply.answered()
 
     async def async_list(self, fresh: bool = False) -> list[dict[str, Any]]:
         """Files on the printer; raises ConnectionError/TimeoutError."""
         if not fresh and self._fetched_at is not None and time.monotonic() - self._fetched_at < LIST_MAX_AGE:
             return self.files
-        waiter = self._waiter
-        if fresh or waiter is None or waiter.done():
-            waiter = self._waiter = asyncio.get_running_loop().create_future()
-            try:
-                await self.coordinator.client.send_json(FILES_REQUEST)
-            except Exception as err:  # noqa: BLE001 - websockets raises its own hierarchy
-                self._waiter = None
-                waiter.cancel()
-                raise ConnectionError(f"File list request failed: {err}") from err
-        try:
-            await asyncio.wait_for(asyncio.shield(waiter), LIST_TIMEOUT)
-        except TimeoutError:
-            if self._waiter is waiter:
-                self._waiter = None
-                waiter.cancel()
-            raise
+        await self._reply.async_wait(fresh)
         return self.files
 
 
@@ -220,6 +204,10 @@ class GcodeArchiver:
         try:
             async with self._lock:
                 delay = await self._process()
+        except Exception:
+            # An unexpected error must not stop the queue for good.
+            _LOGGER.exception("G-code archive pass failed on %s", self.coordinator.host)
+            delay = RETRY_SECONDS
         finally:
             self._store.async_delay_save(self._data, 1)
             if self._again:

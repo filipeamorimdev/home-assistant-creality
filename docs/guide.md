@@ -316,8 +316,9 @@ The **Current print preview** image is fetched by HA from the printer's
 once per 30 seconds per job, with a 5-second timeout and 2 MiB size limit.
 The cache is cleared when the filename, print start time, or print ID changes.
 Paused/completed jobs retain their image while their job metadata remains.
-Firmware without this endpoint leaves the entity unavailable; `preview_reason`
-reports the fetch status. Allow up to 30 seconds for the first image.
+Until the first image arrives, and on firmware without this endpoint, the
+entity state is `unknown` and `preview_reason` reports why (`pending`,
+`fetch_failed`, `no_job`); it is unavailable only while the printer is disconnected. Allow up to 30 seconds for the first image.
 
 In the card, the thumbnail shows a rising layer indicator, a dimmed unprinted
 area and a lightly highlighted printed area, labelled with current / total
@@ -532,5 +533,5 @@ An unchanged scrape leaves the file untouched.
 - The thumbnail layer overlay is an approximation; saved thumbnails have no overlay.
 - G-code profiles need the printer's download endpoint and are not available for USB prints.
 - Energy downtime is not reconstructed; gaps mark totals partial.
-- Saved history plays timelapses from the timelapse folder or the printer; a video in neither (deleted, folder changed, never saved) is gone. Auto-save copies only jobs that end while it is enabled.
+- Saved history plays timelapses from the timelapse folder or the printer; a video in neither (deleted, folder changed, never saved) is gone. Auto-save copies only jobs that end while it is enabled, plus, after a Home Assistant restart, the printer's last finished job if it has no copy yet (it may have ended while Home Assistant was down).
 - Creality Cloud and CFS-specific features are out of scope.
