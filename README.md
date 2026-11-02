@@ -1,8 +1,8 @@
 # Home Assistant Creality Integration
 
-This is an **unofficial** integration that started as a weekend project. 
-
-It is not made, endorsed or supported by Creality (Shenzhen Creality 3D Technology Co., Ltd.). The Creality name is a trademark of its owner and is used only to identify the printers this integration works with.
+> This is an **unofficial** integration that started as a weekend project to get some things I was missing from the official interface.
+> 
+> It is not made, endorsed or supported by Creality (Shenzhen Creality 3D Technology Co., Ltd.). The Creality name is a trademark of its owner and is used only to identify the printers this integration works with.
 
 Home Assistant integration for Creality printers running klipper firmware. It is developed and tested on the Ender 3 V3 KE; other models with the same firmware may work. It talks to the printer directly over your network: no Creality Cloud, no account, no extra add-on.
 
@@ -21,8 +21,6 @@ This project focuses on what happens around a print:
 - **Timelapses**: play or download the printer's timelapse, or save every finished print's timelapse (and its G-code) to a folder or NAS share automatically
 - **Error-code database**: printer error codes are shown as readable messages with a severity, from a database built from the official Creality wiki and shipped with the integration
 - **Bundled cards**: the full card and a compact card are served and registered by the integration itself
-
-If you need broader model coverage or CFS support, [ha_creality_ws](https://github.com/3dg1luk43/ha_creality_ws) is a mature, well-supported integration that covers more Creality models and the CFS. The two talk to the same printer port, so pick the one whose features you need.
 
 ## Highlights
 
