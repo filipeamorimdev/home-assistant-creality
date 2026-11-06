@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -748,7 +748,9 @@ async def test_gcode_saved_once_per_content_after_finish(hass, fake_client, fron
     await hass.async_block_till_done()
 
 
-async def test_print_again_from_printer_file_or_saved_copy(hass, fake_client, frontend_stub, aioclient_mock, tmp_path):
+async def test_print_again_from_printer_file_or_saved_copy(
+    hass, fake_client, frontend_stub, aioclient_mock, tmp_path, hass_admin_user, hass_read_only_user
+):
     from custom_components.creality.websocket import ws_gcode_files, ws_print_again
 
     hass.config.allowlist_external_dirs = {str(tmp_path)}
@@ -760,7 +762,7 @@ async def test_print_again_from_printer_file_or_saved_copy(hass, fake_client, fr
     listing = [("part_PLA_1h30m.gcode", len(GCODE))]
     client.send_json = AsyncMock(side_effect=lambda payload: coordinator._on_message(printer_listing(*listing)))
     status_id = entity_id(hass, "sensor", entry, "print_status")
-    connection = MagicMock()
+    connection = MagicMock(user=hass_admin_user)
     start = FRAME["printStartTime"]
 
     async def call(handler, **msg):
@@ -779,7 +781,19 @@ async def test_print_again_from_printer_file_or_saved_copy(hass, fake_client, fr
     await hass.async_block_till_done(wait_background_tasks=True)
     assert "retGcodeFileInfo" not in coordinator.data
     assert await call(ws_gcode_files, type="creality/gcode_files") == {
-        "saved": [start], "printer": ["part_PLA_1h30m.gcode"]}
+        "saved": [start], "printer": ["part_PLA_1h30m.gcode"], "can_print_again": True}
+
+    # Non-admin users are told they can't, and the command refuses before touching the printer.
+    connection.user = hass_read_only_user
+    assert (await call(ws_gcode_files, type="creality/gcode_files"))["can_print_again"] is False
+    client.send_set_retry.reset_mock()
+    posts_before = len(aioclient_mock.mock_calls)
+    with pytest.raises(Unauthorized):
+        ws_print_again(hass, connection, {"id": 1, "entity_id": status_id, **again})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    client.send_set_retry.assert_not_awaited()
+    assert len(aioclient_mock.mock_calls) == posts_before
+    connection.user = hass_admin_user
 
     # Still on the printer and the same size as the saved copy: started as is.
     client.send_set_retry.reset_mock()

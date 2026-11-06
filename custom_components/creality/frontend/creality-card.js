@@ -3944,7 +3944,11 @@ class CrealityCard extends HTMLElement {
     this._gcodeFilesBusy = true;
     try {
       const res = await this._hass.callWS({ type: "creality/gcode_files", entity_id: this._cfg.status });
-      this._gcodeFiles = { saved: new Set(res?.saved || []), printer: res?.printer ? new Set(res.printer) : null };
+      this._gcodeFiles = {
+        saved: new Set(res?.saved || []),
+        printer: res?.printer ? new Set(res.printer) : null,
+        canPrintAgain: res?.can_print_again === true,
+      };
     } catch (_err) {
       this._gcodeFiles = null; // Older integration: no Print again.
     } finally {
@@ -3953,10 +3957,10 @@ class CrealityCard extends HTMLElement {
     this._renderPrintLog();
   }
 
-  /** A saved copy of the row's G-code exists, or the printer still has the file. */
+  /** Admin only: a saved copy of the row's G-code exists, or the printer still has the file. */
   _canPrintAgain(row) {
     const files = this._gcodeFiles;
-    if (!files) return false;
+    if (!files?.canPrintAgain) return false;
     return files.saved.has(rowStartTime(row)) || Boolean(row.file && files.printer?.has(row.file));
   }
 

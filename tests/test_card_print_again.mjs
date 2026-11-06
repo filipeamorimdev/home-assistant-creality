@@ -35,17 +35,23 @@ function historyCard(status, callWS) {
 const buttons = html => [...html.matchAll(/data-repeat="([^"]+)"([^>]*)>/g)].map(m => [m[1], /disabled/.test(m[2])]);
 
 test('print again shows on rows with a saved copy or a file on the printer', async () => {
-  const { card, nodes } = historyCard('completed', async () => ({ saved: [1791818714], printer: ['b_PETG_2h.gcode'] }));
+  const { card, nodes } = historyCard('completed', async () => ({ saved: [1791818714], printer: ['b_PETG_2h.gcode'], can_print_again: true }));
   await card._loadGcodeFiles();
   assert.deepEqual(buttons(nodes['log-list'].innerHTML), [['saved', false], ['printer', false]]);
 });
 
 test('print again is disabled while a job runs or the printer is offline', async () => {
   for (const status of ['printing', 'paused', 'processing', 'offline']) {
-    const { card, nodes } = historyCard(status, async () => ({ saved: [1791818714], printer: null }));
+    const { card, nodes } = historyCard(status, async () => ({ saved: [1791818714], printer: null, can_print_again: true }));
     await card._loadGcodeFiles();
     assert.deepEqual(buttons(nodes['log-list'].innerHTML), [['saved', true]], status);
   }
+});
+
+test('non-admin users get no print again buttons', async () => {
+  const { card, nodes } = historyCard('completed', async () => ({ saved: [1791818714], printer: ['b_PETG_2h.gcode'], can_print_again: false }));
+  await card._loadGcodeFiles();
+  assert.deepEqual(buttons(nodes['log-list'].innerHTML), []);
 });
 
 test('older integrations without the command show no print again buttons', async () => {

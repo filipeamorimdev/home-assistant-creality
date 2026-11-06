@@ -259,7 +259,14 @@ async def ws_gcode_files(
             printer = [entry["name"] for entry in await coordinator.gcode.files.async_list()]
         except (ConnectionError, TimeoutError):
             printer = None
-    connection.send_result(msg["id"], {"saved": await coordinator.gcode.async_saved_jobs(), "printer": printer})
+    connection.send_result(
+        msg["id"],
+        {
+            "saved": await coordinator.gcode.async_saved_jobs(),
+            "printer": printer,
+            "can_print_again": connection.user.is_admin,
+        },
+    )
 
 
 _PRINT_AGAIN_ERRORS = {
@@ -278,6 +285,7 @@ _PRINT_AGAIN_ERRORS = {
         vol.Optional("file"): vol.Any(None, str),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_print_again(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]

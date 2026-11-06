@@ -53,7 +53,7 @@
       file: "clip_PETG_20m.gcode", result: "stopped", timeSeconds: 600, filamentType: "PETG", currency: "€" },
   ] };
   const extraWS = { "frontend/get_user_data": () => ({ value: printLog }),
-    "creality/gcode_files": () => ({ saved: [1791818714], printer: ["clip_PETG_20m.gcode"] }),
+    "creality/gcode_files": () => ({ saved: [1791818714], printer: ["clip_PETG_20m.gcode"], can_print_again: true }),
     "creality/print_again": () => ({ file: "/usr/data/printer_data/gcodes/x.gcode", uploaded: false }) };
   const callWS = async (msg) => extraWS[msg.type] ? extraWS[msg.type](msg) : msg.type === "creality/print_profile"
     ? { status: "ready", file: FILE, profile } : msg.type === "creality/timelapse" ? timelapse()

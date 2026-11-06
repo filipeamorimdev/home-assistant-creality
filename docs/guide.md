@@ -475,7 +475,8 @@ off), otherwise the printer's while it still has it (it keeps roughly the last
 Rows whose G-code is available show a **Print again** button (printer icon next to the
 delete button): the job has a copy in `gcode-files/`, or the printer still has
 the file. It is disabled while a job runs or the printer is offline, and asks
-before starting (clear the build plate first).
+before starting (clear the build plate first). Only administrators see the
+button and can start a print.
 
 - If the printer still has a file with that name and the same size as the
   saved copy, that file is started.
